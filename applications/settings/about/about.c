@@ -72,52 +72,6 @@ static DialogMessageButton compliance_screen(DialogsApp* dialogs, DialogMessage*
     return result;
 }
 
-static DialogMessageButton unleashed_info_screen(DialogsApp* dialogs, DialogMessage* message) {
-    DialogMessageButton result;
-
-    const char* screen_header = "Unleashed Firmware\n";
-
-    const char* screen_text = "Is for experimental purposes\nonly "
-                              "and is not meant for any\nillegal use! "
-                              "We do not condone\nany illegal activity.";
-
-    dialog_message_set_header(message, screen_header, 0, 0, AlignLeft, AlignTop);
-    dialog_message_set_text(message, screen_text, 0, 11, AlignLeft, AlignTop);
-    result = dialog_message_show(dialogs, message);
-    dialog_message_set_header(message, NULL, 0, 0, AlignLeft, AlignTop);
-    dialog_message_set_text(message, NULL, 0, 0, AlignLeft, AlignTop);
-
-    return result;
-}
-
-static DialogMessageButton unleashed_info_screen2(DialogsApp* dialogs, DialogMessage* message) {
-    DialogMessageButton result;
-
-    const char* screen_text =
-        "This firmware is free and\ndistributed under\nthe OpenSource license.\n"
-        "If you paid any money for it\n- you got scammed.";
-
-    dialog_message_set_text(message, screen_text, 0, 0, AlignLeft, AlignTop);
-    result = dialog_message_show(dialogs, message);
-    dialog_message_set_text(message, NULL, 0, 0, AlignLeft, AlignTop);
-
-    return result;
-}
-
-static DialogMessageButton unleashed_info_screen3(DialogsApp* dialogs, DialogMessage* message) {
-    DialogMessageButton result;
-
-    const char* screen_text = "Community apps included in\nall builds except `c` build\n"
-                              "For updates and more visit:\n"
-                              "github.com/DarkFlippers";
-
-    dialog_message_set_text(message, screen_text, 0, 0, AlignLeft, AlignTop);
-    result = dialog_message_show(dialogs, message);
-    dialog_message_set_text(message, NULL, 0, 0, AlignLeft, AlignTop);
-
-    return result;
-}
-
 static DialogMessageButton hw_version_screen(DialogsApp* dialogs, DialogMessage* message) {
     DialogMessageButton result;
     FuriString* buffer;
@@ -190,14 +144,12 @@ static DialogMessageButton fw_version_screen(DialogsApp* dialogs, DialogMessage*
 }
 
 const AboutDialogScreen about_screens[] = {
-    unleashed_info_screen,
-    unleashed_info_screen2,
-    unleashed_info_screen3,
     product_screen,
     compliance_screen,
     address_screen,
     hw_version_screen,
-    fw_version_screen};
+    fw_version_screen,
+};
 
 int32_t about_settings_app(void* p) {
     UNUSED(p);
