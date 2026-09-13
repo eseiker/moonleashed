@@ -53,6 +53,46 @@ typedef struct {
     XipCacheSectionEntry sections[XIP_CACHE_MAX_SECTIONS];
 } XipCacheHeader;
 
+/* ---- Multi-tenant directory (TASK-573) ------------------------------------
+ * The region's first page holds a directory of tenants: several app images
+ * coexist in flash at once, each in its own page-aligned block. Launching an
+ * app that is already a tenant is a cache hit with no flash write; a miss
+ * allocates a new block, evicting least-recently-used tenants if the region is
+ * full. A tenant is never evicted while its app executes (it is "pinned").
+ */
+
+/** Directory magic value ("XIPD"). */
+#define XIP_DIR_MAGIC 0x58495044u
+
+/** Directory format version; bump to invalidate every cached tenant at once. */
+#define XIP_DIR_FORMAT_VERSION 1u
+
+/** Maximum tenants held at once. The whole directory must fit one flash page. */
+#define XIP_MAX_TENANTS 6
+
+/** One tenant: an app image cached in the region. */
+typedef struct {
+    uint32_t valid; /**< 1 if this slot holds a tenant */
+    uint32_t file_size; /**< FAP file size (quick identity check) */
+    uint32_t file_crc32; /**< CRC32 of the FAP file (definitive identity) */
+    uint32_t api_version; /**< Firmware API version (major << 16 | minor) */
+    uint32_t block_addr; /**< Page-aligned flash address of this image */
+    uint32_t block_pages; /**< Image size in flash pages */
+    uint32_t ram_addr_hash; /**< Hash of RAM section addresses when cached */
+    uint32_t section_count; /**< Number of cached sections */
+    uint32_t lru; /**< Higher is more recently used */
+    XipCacheSectionEntry sections[XIP_CACHE_MAX_SECTIONS]; /**< Offsets from block_addr */
+} XipTenantEntry;
+
+/** Directory stored in the region's first flash page. */
+typedef struct {
+    uint32_t magic; /**< XIP_DIR_MAGIC */
+    uint32_t format_version; /**< XIP_DIR_FORMAT_VERSION */
+    uint32_t lru_next; /**< Next LRU value to assign */
+    uint32_t reserved; /**< Padding / future use */
+    XipTenantEntry tenants[XIP_MAX_TENANTS];
+} XipDirectory;
+
 /** XIP flash region bump allocator.
  *  Manages a region of internal flash used for execute-in-place loading
  *  of FAP .text and .rodata sections.
@@ -66,6 +106,49 @@ typedef struct {
     bool cache_valid; /**< True if cached XIP data matches current app */
     bool needs_rerelocation; /**< Cache hit but RAM addrs changed — patch in place */
 } XipRegion;
+
+/* ---- Multi-tenant manager API (TASK-573) ----------------------------------
+ * A process-wide manager owns the shared region and its directory. The old
+ * single-tenant functions below still exist during the migration.
+ */
+
+/** Discover the flash region and load its directory, formatting an empty one in
+ *  RAM if flash holds no valid directory. Idempotent. Returns true if a region
+ *  of at least XIP_REGION_MIN_SIZE is available. */
+bool xip_manager_ensure(void);
+
+/** True once xip_manager_ensure() has found a usable region. */
+bool xip_manager_active(void);
+
+/** Region geometry, valid after xip_manager_ensure() succeeds. */
+uint32_t xip_manager_region_base(void);
+uint32_t xip_manager_region_end(void);
+
+/** Find a tenant matching this identity. Returns its index, or -1. */
+int xip_manager_find(uint32_t file_crc32, uint32_t file_size, uint32_t api_version);
+
+/** Read-only pointer to a tenant entry (in the RAM directory copy). */
+const XipTenantEntry* xip_manager_tenant(int index);
+
+/** Mark a tenant used now (bumps its LRU). */
+void xip_manager_touch(int index);
+
+/** Allocate a page-aligned block of `pages` pages, evicting least-recently-used
+ *  non-pinned tenants if needed. Returns the block's flash address, or 0. The
+ *  RAM directory is updated (evictions applied); the caller then fills a tenant
+ *  slot and calls xip_manager_commit(). */
+uint32_t xip_manager_alloc_block(uint32_t pages);
+
+/** Store a tenant entry into a free directory slot in RAM. Returns the slot
+ *  index, or -1 if the directory is full. */
+int xip_manager_put_tenant(const XipTenantEntry* entry);
+
+/** Write the RAM directory back to its flash page (erase + write). */
+bool xip_manager_commit(void);
+
+/** Pin / unpin a block range so eviction never touches a running app. */
+void xip_manager_pin(uint32_t block_addr, uint32_t block_pages);
+void xip_manager_unpin(uint32_t block_addr, uint32_t block_pages);
 
 /** Initialize XIP region from free flash.
  *  Reserves space for the cache header at the start.

@@ -252,3 +252,232 @@ size_t xip_region_used(const XipRegion* region) {
     if(!region->active) return 0;
     return region->next_free - region->data_start;
 }
+
+/* ==== Multi-tenant manager (TASK-573) ======================================
+ * A process-wide owner of the shared XIP region and its on-flash directory.
+ * The single-tenant functions above are still used by the current loader path;
+ * the manager is wired in by the elf_file.c integration milestone.
+ */
+
+#define XIP_MGR_MAX_PINNED (XIP_MAX_TENANTS + 2)
+
+static struct {
+    bool attached;
+    uint32_t base; /**< region start (directory page) */
+    uint32_t end; /**< region end */
+    uint32_t page_size;
+    uint32_t total_pages; /**< pages in the whole region, directory included */
+    XipDirectory dir; /**< RAM working copy of the flash directory */
+    struct {
+        uint32_t addr;
+        uint32_t pages;
+    } pinned[XIP_MGR_MAX_PINNED];
+    size_t pinned_count;
+} xip_mgr;
+
+static void xip_manager_format(void) {
+    memset(&xip_mgr.dir, 0, sizeof(xip_mgr.dir));
+    xip_mgr.dir.magic = XIP_DIR_MAGIC;
+    xip_mgr.dir.format_version = XIP_DIR_FORMAT_VERSION;
+    xip_mgr.dir.lru_next = 1;
+}
+
+bool xip_manager_ensure(void) {
+    if(xip_mgr.attached) return true;
+
+    size_t free_start = furi_hal_flash_get_free_page_start_address();
+    size_t free_end = (size_t)furi_hal_flash_get_free_end_address();
+    if(free_end <= free_start) return false;
+
+    size_t region_size = MIN((size_t)(free_end - free_start), (size_t)XIP_REGION_MAX_SIZE);
+    if(region_size < XIP_REGION_MIN_SIZE) return false;
+
+    xip_mgr.base = (uint32_t)free_start;
+    xip_mgr.page_size = furi_hal_flash_get_page_size();
+    /* Whole pages only; a partial tail page is unusable for a page-aligned block. */
+    xip_mgr.total_pages = region_size / xip_mgr.page_size;
+    xip_mgr.end = xip_mgr.base + xip_mgr.total_pages * xip_mgr.page_size;
+    xip_mgr.pinned_count = 0;
+
+    /* Load the directory from flash (memory-mapped), or format a fresh one. */
+    const XipDirectory* flash_dir = (const XipDirectory*)xip_mgr.base;
+    if(flash_dir->magic == XIP_DIR_MAGIC &&
+       flash_dir->format_version == XIP_DIR_FORMAT_VERSION) {
+        memcpy(&xip_mgr.dir, flash_dir, sizeof(xip_mgr.dir));
+        FURI_LOG_I(TAG, "Directory loaded from flash");
+    } else {
+        xip_manager_format();
+        FURI_LOG_I(TAG, "No valid directory; starting empty");
+    }
+
+    xip_mgr.attached = true;
+    FURI_LOG_I(
+        TAG,
+        "Manager attached: 0x%08lX - 0x%08lX (%lu pages)",
+        xip_mgr.base,
+        xip_mgr.end,
+        xip_mgr.total_pages);
+    return true;
+}
+
+bool xip_manager_active(void) {
+    return xip_mgr.attached;
+}
+
+uint32_t xip_manager_region_base(void) {
+    return xip_mgr.base;
+}
+
+uint32_t xip_manager_region_end(void) {
+    return xip_mgr.end;
+}
+
+int xip_manager_find(uint32_t file_crc32, uint32_t file_size, uint32_t api_version) {
+    if(!xip_mgr.attached) return -1;
+    for(int i = 0; i < XIP_MAX_TENANTS; i++) {
+        const XipTenantEntry* t = &xip_mgr.dir.tenants[i];
+        if(t->valid && t->file_crc32 == file_crc32 && t->file_size == file_size &&
+           t->api_version == api_version) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+const XipTenantEntry* xip_manager_tenant(int index) {
+    if(!xip_mgr.attached || index < 0 || index >= XIP_MAX_TENANTS) return NULL;
+    return &xip_mgr.dir.tenants[index];
+}
+
+void xip_manager_touch(int index) {
+    if(!xip_mgr.attached || index < 0 || index >= XIP_MAX_TENANTS) return;
+    xip_mgr.dir.tenants[index].lru = xip_mgr.dir.lru_next++;
+}
+
+/* First page (page 0) is the directory; page indices below are region-relative. */
+static uint32_t xip_page_of(uint32_t addr) {
+    return (addr - xip_mgr.base) / xip_mgr.page_size;
+}
+
+static bool xip_page_pinned(uint32_t page) {
+    for(size_t i = 0; i < xip_mgr.pinned_count; i++) {
+        uint32_t p0 = xip_page_of(xip_mgr.pinned[i].addr);
+        if(page >= p0 && page < p0 + xip_mgr.pinned[i].pages) return true;
+    }
+    return false;
+}
+
+/* Mark which region pages are occupied by valid tenants. page_used[0] (the
+ * directory) is always set. */
+static void xip_mark_used(bool* page_used) {
+    memset(page_used, 0, xip_mgr.total_pages * sizeof(bool));
+    page_used[0] = true;
+    for(int i = 0; i < XIP_MAX_TENANTS; i++) {
+        const XipTenantEntry* t = &xip_mgr.dir.tenants[i];
+        if(!t->valid) continue;
+        uint32_t p0 = xip_page_of(t->block_addr);
+        for(uint32_t p = p0; p < p0 + t->block_pages && p < xip_mgr.total_pages; p++) {
+            page_used[p] = true;
+        }
+    }
+}
+
+/* Find the first run of `pages` contiguous free pages. Returns the start page,
+ * or 0 (never valid, page 0 is the directory) if none. */
+static uint32_t xip_find_free_run(const bool* page_used, uint32_t pages) {
+    uint32_t run = 0;
+    for(uint32_t p = 1; p < xip_mgr.total_pages; p++) {
+        if(page_used[p]) {
+            run = 0;
+            continue;
+        }
+        if(++run == pages) return p - pages + 1;
+    }
+    return 0;
+}
+
+/* Evict the least-recently-used valid, non-pinned tenant. Returns false if none
+ * can be evicted. */
+static bool xip_evict_one(void) {
+    int victim = -1;
+    uint32_t best_lru = UINT32_MAX;
+    for(int i = 0; i < XIP_MAX_TENANTS; i++) {
+        const XipTenantEntry* t = &xip_mgr.dir.tenants[i];
+        if(!t->valid) continue;
+        if(xip_page_pinned(xip_page_of(t->block_addr))) continue;
+        if(t->lru < best_lru) {
+            best_lru = t->lru;
+            victim = i;
+        }
+    }
+    if(victim < 0) return false;
+    FURI_LOG_I(TAG, "Evicting tenant %d (lru %lu)", victim, best_lru);
+    xip_mgr.dir.tenants[victim].valid = 0;
+    return true;
+}
+
+uint32_t xip_manager_alloc_block(uint32_t pages) {
+    if(!xip_mgr.attached || pages == 0) return 0;
+    if(pages > xip_mgr.total_pages - 1) return 0; /* cannot fit even alone */
+
+    bool* page_used = malloc(xip_mgr.total_pages * sizeof(bool));
+    if(!page_used) return 0;
+
+    uint32_t start_page = 0;
+    while(1) {
+        xip_mark_used(page_used);
+        start_page = xip_find_free_run(page_used, pages);
+        if(start_page != 0) break;
+        if(!xip_evict_one()) break; /* nothing left to free */
+    }
+    free(page_used);
+
+    if(start_page == 0) {
+        FURI_LOG_E(TAG, "No room for %lu pages even after eviction", pages);
+        return 0;
+    }
+    return xip_mgr.base + start_page * xip_mgr.page_size;
+}
+
+int xip_manager_put_tenant(const XipTenantEntry* entry) {
+    if(!xip_mgr.attached || !entry) return -1;
+    for(int i = 0; i < XIP_MAX_TENANTS; i++) {
+        if(!xip_mgr.dir.tenants[i].valid) {
+            xip_mgr.dir.tenants[i] = *entry;
+            xip_mgr.dir.tenants[i].valid = 1;
+            return i;
+        }
+    }
+    return -1;
+}
+
+bool xip_manager_commit(void) {
+    if(!xip_mgr.attached) return false;
+    int16_t page = furi_hal_flash_get_page_number(xip_mgr.base);
+    furi_check(page >= 0);
+    furi_hal_flash_erase(page);
+    furi_hal_flash_write_block(xip_mgr.base, (const uint8_t*)&xip_mgr.dir, sizeof(xip_mgr.dir));
+    FURI_LOG_I(TAG, "Directory committed");
+    return true;
+}
+
+void xip_manager_pin(uint32_t block_addr, uint32_t block_pages) {
+    if(!xip_mgr.attached || block_pages == 0) return;
+    if(xip_mgr.pinned_count >= XIP_MGR_MAX_PINNED) {
+        FURI_LOG_E(TAG, "Pin table full");
+        return;
+    }
+    xip_mgr.pinned[xip_mgr.pinned_count].addr = block_addr;
+    xip_mgr.pinned[xip_mgr.pinned_count].pages = block_pages;
+    xip_mgr.pinned_count++;
+}
+
+void xip_manager_unpin(uint32_t block_addr, uint32_t block_pages) {
+    for(size_t i = 0; i < xip_mgr.pinned_count; i++) {
+        if(xip_mgr.pinned[i].addr == block_addr && xip_mgr.pinned[i].pages == block_pages) {
+            xip_mgr.pinned[i] = xip_mgr.pinned[xip_mgr.pinned_count - 1];
+            xip_mgr.pinned_count--;
+            return;
+        }
+    }
+}
