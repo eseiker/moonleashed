@@ -62,7 +62,7 @@ class GitVersion:
             "GIT_BRANCH": branch,
             "VERSION": version,
             "BUILD_DIRTY": dirty and 1 or 0,
-            "GIT_ORIGIN": "https://github.com/DarkFlippers/unleashed-firmware.git",
+            "GIT_ORIGIN": "https://github.com/eseiker/moonleashed.git",
             "GIT_COMMIT_DATE": commit_date,
         }
     
