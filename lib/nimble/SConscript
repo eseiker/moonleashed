@@ -1,0 +1,37 @@
+Import("env")
+
+# Vendored Apache NimBLE host + NPL-over-FURI port + Flipper glue, built as a
+# firmware static library so the bt service links the on-device BLE host
+# directly (no FAP, no SD plugin, no firmware_api_interface indirection).
+# Direction: KNOW-597; TASK-599. The only NimBLE surface the rest of the
+# firmware includes is glue/nimble_glue.h, which is deliberately plain C.
+
+nimble_include_paths = [
+    "#/lib/nimble",
+    "#/lib/nimble/nimble/include",
+    "#/lib/nimble/nimble/host/include",
+    "#/lib/nimble/nimble/host/util/include",
+    "#/lib/nimble/nimble/host/services/gap/include",
+    "#/lib/nimble/nimble/host/services/gatt/include",
+    "#/lib/nimble/nimble/host/store/config/include",
+    "#/lib/nimble/nimble/transport/include",
+    "#/lib/nimble/porting/nimble/include",
+    "#/lib/nimble/porting/npl/furi/include",
+    "#/lib/nimble/glue",
+]
+
+libenv = env.Clone(FW_LIB_NAME="nimble")
+libenv.ApplyLibFlags()
+libenv.AppendUnique(
+    CPPPATH=nimble_include_paths,
+    # Vendored third-party tree: silence its warnings so the firmware's -Werror
+    # does not trip on upstream NimBLE style. Mirrors the old fap cflags=["-w"].
+    # Appended after ApplyLibFlags so -w wins over -Werror on the command line.
+    CCFLAGS=["-w"],
+)
+
+sources = libenv.GlobRecursive("*.c")
+
+lib = libenv.StaticLibrary("${FW_LIB_NAME}", sources)
+libenv.Install("${LIB_DIST_DIR}", lib)
+Return("lib")
