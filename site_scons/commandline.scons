@@ -151,6 +151,7 @@ vars.AddVariables(
             "ble_full",
             "ble_light",
             "ble_basic",
+            "ble_hci",
         ],
     ),
     PathVariable(

@@ -22,7 +22,9 @@ static FuriMessageQueue* rx_queue;
 static FuriSemaphore* command_free;
 static FuriSemaphore* acl_free;
 static bool initialized;
+static bool hci_layer_started;
 static volatile bool owned;
+static volatile bool hci_layer_owned;
 static volatile bool fault;
 static volatile bool acl_pending;
 static volatile uint16_t pending_opcode;
@@ -104,7 +106,9 @@ uint32_t furi_hal_bt_hci_get_abi(void) {
 bool furi_hal_bt_hci_acquire(uint32_t abi) {
     if(abi != FURI_HAL_BT_HCI_ABI || owned || !ble_glue_is_alive()) return false;
     const BleGlueC2Info* info = ble_glue_get_c2_info();
-    if(info->mode != BleGlueC2ModeStack || info->StackType != INFO_STACK_TYPE_BLE_FULL ||
+    bool hci_layer = info->StackType == INFO_STACK_TYPE_BLE_HCI;
+    bool full_stack = info->StackType == INFO_STACK_TYPE_BLE_FULL;
+    if(info->mode != BleGlueC2ModeStack || (!hci_layer && !full_stack) ||
        info->VersionMajor != 1 || info->VersionMinor != 20 || info->VersionSub != 0)
         return false;
 
@@ -115,7 +119,7 @@ bool furi_hal_bt_hci_acquire(uint32_t abi) {
         initialized = true;
     }
 
-    if(!furi_hal_bt_enter_ll_only()) return false;
+    if(full_stack && !furi_hal_bt_enter_ll_only()) return false;
 
     furi_message_queue_reset(rx_queue);
     acl_pending = false;
@@ -123,30 +127,34 @@ bool furi_hal_bt_hci_acquire(uint32_t abi) {
     command_status = 0xff;
     fault = false;
     if(!reset_semaphore(command_free) || !reset_semaphore(acl_free)) {
-        furi_hal_bt_leave_ll_only();
+        if(full_stack) furi_hal_bt_leave_ll_only();
         fault = true;
         return false;
     }
 
-    TL_BLE_InitConf_t config = {
-        .IoBusEvtCallBack = controller_event,
-        .IoBusAclDataTxAck = acl_ack,
-        .p_cmdbuffer = (uint8_t*)&command_buffer,
-        .p_AclDataBuffer = acl_buffer,
-    };
-    TL_BLE_Init(&config);
+    if(full_stack || !hci_layer_started) {
+        TL_BLE_InitConf_t config = {
+            .IoBusEvtCallBack = controller_event,
+            .IoBusAclDataTxAck = acl_ack,
+            .p_cmdbuffer = (uint8_t*)&command_buffer,
+            .p_AclDataBuffer = acl_buffer,
+        };
+        TL_BLE_Init(&config);
+    }
 
     furi_hal_power_insomnia_enter();
 
-    if(!ble_app_start_ll_only()) {
-        furi_hal_bt_leave_ll_only();
+    if((full_stack || !hci_layer_started) && !ble_app_start_ll_only()) {
+        if(full_stack) furi_hal_bt_leave_ll_only();
         furi_hal_power_insomnia_exit();
         fault = true;
         return false;
     }
+    if(hci_layer) hci_layer_started = true;
 
-    /* Drain callbacks queued before the LL-only init completed. */
+    /* Drain callbacks queued before the raw-controller init completed. */
     furi_delay_tick(1);
+    hci_layer_owned = hci_layer;
     owned = true;
     return true;
 }
@@ -195,7 +203,8 @@ bool furi_hal_bt_hci_release(void) {
         }
     }
     owned = false;
-    bool restored = furi_hal_bt_leave_ll_only();
+    bool restored = hci_layer_owned || furi_hal_bt_leave_ll_only();
+    hci_layer_owned = false;
     ok = ok && restored;
     if(!ok) fault = true;
     furi_hal_power_insomnia_exit();

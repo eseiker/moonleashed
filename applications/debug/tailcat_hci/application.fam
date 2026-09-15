@@ -1,0 +1,11 @@
+App(
+    appid="tailcat_hci",
+    name="Tailcat HCI Bridge",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="tailcat_hci_app",
+    requires=["gui"],
+    stack_size=4096,
+    fap_category="Tools",
+    fap_version=(0, 3),
+    fap_description="USB CDC H4 bridge using the STM32WB BLE HCILayer stack",
+)
