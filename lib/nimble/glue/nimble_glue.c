@@ -39,6 +39,7 @@
 #include "nimble_glue.h"
 #include "serial_gatt.h"
 #include "serial_store.h"
+#include "hid_gatt.h"
 
 #define TAG "NimbleGlue"
 
@@ -88,6 +89,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             glue.pairing = false;
             glue.conn_handle = event->connect.conn_handle;
             serial_gatt_set_conn(event->connect.conn_handle, true);
+            hid_gatt_set_conn(event->connect.conn_handle, true);
             FURI_LOG_I(TAG, "Central connected, handle %u", event->connect.conn_handle);
         } else {
             FURI_LOG_W(TAG, "Connect failed: %d", event->connect.status);
@@ -102,6 +104,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         glue.bonded = false;
         glue.conn_handle = BLE_HS_CONN_HANDLE_NONE;
         serial_gatt_set_conn(0, false);
+        hid_gatt_set_conn(0, false);
         serial_store_save(); /* persist any CCCDs written during the connection */
         start_advertise();
         break;
@@ -175,10 +178,13 @@ static void start_advertise(void) {
     memset(&fields, 0, sizeof(fields));
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
+    /* Advertise the Serial Service UUID (first, so the verified companion scan
+     * still finds it) and the HID Service UUID 0x1812 so a phone offers the
+     * Flipper as a BLE input device. */
     uint16_t svc16 = 0x3080 | (uint16_t)furi_hal_version_get_hw_color();
-    ble_uuid16_t adv_uuid = BLE_UUID16_INIT(svc16);
-    fields.uuids16 = &adv_uuid;
-    fields.num_uuids16 = 1;
+    ble_uuid16_t adv_uuids[2] = {BLE_UUID16_INIT(svc16), BLE_UUID16_INIT(0x1812)};
+    fields.uuids16 = adv_uuids;
+    fields.num_uuids16 = 2;
     fields.uuids16_is_complete = 1;
 
     const char* name = furi_hal_version_get_device_name_ptr();
@@ -196,7 +202,7 @@ static void start_advertise(void) {
 
     struct ble_hs_adv_fields rsp;
     memset(&rsp, 0, sizeof(rsp));
-    rsp.appearance = 0x8600;
+    rsp.appearance = 0x03C1; /* HID Keyboard, so hosts offer BLE HID pairing */
     rsp.appearance_is_present = 1;
     ble_gap_adv_rsp_set_fields(&rsp);
 
@@ -336,6 +342,15 @@ bool nimble_glue_start(void) {
     }
     serial_gatt_init();
 
+    /* Register the HID (+ Device Information + Battery) services in the same GATT
+     * table so the Serial Service and BLE HID coexist on one connection. NimBLE
+     * fixes the table before the host starts, so both are added here at boot. */
+    rc = hid_gatt_register();
+    if(rc != 0) {
+        FURI_LOG_E(TAG, "hid_gatt_register failed: %d", rc);
+        return false;
+    }
+
     glue.host_run = true;
     glue.host = furi_thread_alloc_ex("NimbleHost", 4096, host_task, NULL);
     if(!glue.host) {
@@ -404,6 +419,41 @@ void nimble_glue_forget_bonds(void) {
     /* Drop the in-RAM bonds and the persisted copy. */
     ble_store_clear();
     serial_store_forget();
+}
+
+/* BLE HID report senders — thin passthrough to the HID GATT server. */
+bool nimble_glue_hid_kb_press(uint16_t button) {
+    return hid_gatt_kb_press(button);
+}
+bool nimble_glue_hid_kb_release(uint16_t button) {
+    return hid_gatt_kb_release(button);
+}
+bool nimble_glue_hid_kb_release_all(void) {
+    return hid_gatt_kb_release_all();
+}
+bool nimble_glue_hid_consumer_press(uint16_t button) {
+    return hid_gatt_consumer_press(button);
+}
+bool nimble_glue_hid_consumer_release(uint16_t button) {
+    return hid_gatt_consumer_release(button);
+}
+bool nimble_glue_hid_consumer_release_all(void) {
+    return hid_gatt_consumer_release_all();
+}
+bool nimble_glue_hid_mouse_move(int8_t dx, int8_t dy) {
+    return hid_gatt_mouse_move(dx, dy);
+}
+bool nimble_glue_hid_mouse_press(uint8_t button) {
+    return hid_gatt_mouse_press(button);
+}
+bool nimble_glue_hid_mouse_release(uint8_t button) {
+    return hid_gatt_mouse_release(button);
+}
+bool nimble_glue_hid_mouse_release_all(void) {
+    return hid_gatt_mouse_release_all();
+}
+bool nimble_glue_hid_mouse_scroll(int8_t delta) {
+    return hid_gatt_mouse_scroll(delta);
 }
 
 bool nimble_glue_faulted(void) {

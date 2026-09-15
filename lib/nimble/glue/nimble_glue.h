@@ -59,6 +59,22 @@ void nimble_glue_disconnect(void);
 /* Clear all bonds: the in-RAM store and the persisted file. */
 void nimble_glue_forget_bonds(void);
 
+/* BLE HID report senders (TASK-604), routed to the HID GATT server that is
+ * registered alongside the Serial Service. The keyboard button is
+ * (mods << 8) | keycode, matching the stock ble_profile_hid API. Each returns
+ * true if the notification was queued (a central must be connected). */
+bool nimble_glue_hid_kb_press(uint16_t button);
+bool nimble_glue_hid_kb_release(uint16_t button);
+bool nimble_glue_hid_kb_release_all(void);
+bool nimble_glue_hid_consumer_press(uint16_t button);
+bool nimble_glue_hid_consumer_release(uint16_t button);
+bool nimble_glue_hid_consumer_release_all(void);
+bool nimble_glue_hid_mouse_move(int8_t dx, int8_t dy);
+bool nimble_glue_hid_mouse_press(uint8_t button);
+bool nimble_glue_hid_mouse_release(uint8_t button);
+bool nimble_glue_hid_mouse_release_all(void);
+bool nimble_glue_hid_mouse_scroll(int8_t delta);
+
 /* True if the HCI transport latched a fault. */
 bool nimble_glue_faulted(void);
 
