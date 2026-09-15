@@ -1,4 +1,5 @@
 #include "hid_profile.h"
+#include "hid_profile_backend.h"
 
 #include <furi_hal_usb_hid.h>
 #include <services/dev_info_service.h>
@@ -124,6 +125,14 @@ static const uint8_t ble_profile_hid_report_map_data[] = {
     HID_END_COLLECTION,
 };
 
+/* Optional backend that overrides the CPU2 HID report path (see hid_profile.h).
+ * The firmware bt service installs a NimBLE-backed one on an HCILayer radio. */
+static const BleProfileHidBackend* s_hid_backend = NULL;
+
+void ble_profile_hid_set_backend(const BleProfileHidBackend* backend) {
+    s_hid_backend = backend;
+}
+
 typedef struct {
     FuriHalBleProfileBase base;
 
@@ -186,6 +195,7 @@ static void ble_profile_hid_stop(FuriHalBleProfileBase* profile) {
 }
 
 bool ble_profile_hid_kb_press(FuriHalBleProfileBase* profile, uint16_t button) {
+    if(s_hid_backend) return s_hid_backend->kb_press(button);
     furi_check(profile);
     furi_check(profile->config == ble_profile_hid);
 
@@ -206,6 +216,7 @@ bool ble_profile_hid_kb_press(FuriHalBleProfileBase* profile, uint16_t button) {
 }
 
 bool ble_profile_hid_kb_release(FuriHalBleProfileBase* profile, uint16_t button) {
+    if(s_hid_backend) return s_hid_backend->kb_release(button);
     furi_check(profile);
     furi_check(profile->config == ble_profile_hid);
 
@@ -227,6 +238,7 @@ bool ble_profile_hid_kb_release(FuriHalBleProfileBase* profile, uint16_t button)
 }
 
 bool ble_profile_hid_kb_release_all(FuriHalBleProfileBase* profile) {
+    if(s_hid_backend) return s_hid_backend->kb_release_all();
     furi_check(profile);
     furi_check(profile->config == ble_profile_hid);
 
@@ -244,6 +256,7 @@ bool ble_profile_hid_kb_release_all(FuriHalBleProfileBase* profile) {
 }
 
 bool ble_profile_hid_consumer_key_press(FuriHalBleProfileBase* profile, uint16_t button) {
+    if(s_hid_backend) return s_hid_backend->consumer_press(button);
     furi_check(profile);
     furi_check(profile->config == ble_profile_hid);
 
@@ -263,6 +276,7 @@ bool ble_profile_hid_consumer_key_press(FuriHalBleProfileBase* profile, uint16_t
 }
 
 bool ble_profile_hid_consumer_key_release(FuriHalBleProfileBase* profile, uint16_t button) {
+    if(s_hid_backend) return s_hid_backend->consumer_release(button);
     furi_check(profile);
     furi_check(profile->config == ble_profile_hid);
 
@@ -282,6 +296,7 @@ bool ble_profile_hid_consumer_key_release(FuriHalBleProfileBase* profile, uint16
 }
 
 bool ble_profile_hid_consumer_key_release_all(FuriHalBleProfileBase* profile) {
+    if(s_hid_backend) return s_hid_backend->consumer_release_all();
     furi_check(profile);
     furi_check(profile->config == ble_profile_hid);
 
@@ -298,6 +313,7 @@ bool ble_profile_hid_consumer_key_release_all(FuriHalBleProfileBase* profile) {
 }
 
 bool ble_profile_hid_mouse_move(FuriHalBleProfileBase* profile, int8_t dx, int8_t dy) {
+    if(s_hid_backend) return s_hid_backend->mouse_move(dx, dy);
     furi_check(profile);
     furi_check(profile->config == ble_profile_hid);
 
@@ -316,6 +332,7 @@ bool ble_profile_hid_mouse_move(FuriHalBleProfileBase* profile, int8_t dx, int8_
 }
 
 bool ble_profile_hid_mouse_press(FuriHalBleProfileBase* profile, uint8_t button) {
+    if(s_hid_backend) return s_hid_backend->mouse_press(button);
     furi_check(profile);
     furi_check(profile->config == ble_profile_hid);
 
@@ -330,6 +347,7 @@ bool ble_profile_hid_mouse_press(FuriHalBleProfileBase* profile, uint8_t button)
 }
 
 bool ble_profile_hid_mouse_release(FuriHalBleProfileBase* profile, uint8_t button) {
+    if(s_hid_backend) return s_hid_backend->mouse_release(button);
     furi_check(profile);
     furi_check(profile->config == ble_profile_hid);
 
@@ -344,6 +362,7 @@ bool ble_profile_hid_mouse_release(FuriHalBleProfileBase* profile, uint8_t butto
 }
 
 bool ble_profile_hid_mouse_release_all(FuriHalBleProfileBase* profile) {
+    if(s_hid_backend) return s_hid_backend->mouse_release_all();
     furi_check(profile);
     furi_check(profile->config == ble_profile_hid);
 
@@ -358,6 +377,7 @@ bool ble_profile_hid_mouse_release_all(FuriHalBleProfileBase* profile) {
 }
 
 bool ble_profile_hid_mouse_scroll(FuriHalBleProfileBase* profile, int8_t delta) {
+    if(s_hid_backend) return s_hid_backend->mouse_scroll(delta);
     furi_check(profile);
     furi_check(profile->config == ble_profile_hid);
 

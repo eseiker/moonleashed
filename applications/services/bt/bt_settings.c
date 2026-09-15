@@ -9,7 +9,9 @@
 #define TAG "BtSettings"
 
 #define BT_SETTINGS_PATH    INT_PATH(BT_SETTINGS_FILE_NAME)
-#define BT_SETTINGS_VERSION (0)
+/* v1 adds ble_mode; the size/version change makes an old v0 file load as
+ * defaults (enabled=false, ble_mode=0 = combined), which is the safe default. */
+#define BT_SETTINGS_VERSION (1)
 #define BT_SETTINGS_MAGIC   (0x19)
 
 void bt_settings_load(BtSettings* bt_settings) {
@@ -22,6 +24,7 @@ void bt_settings_load(BtSettings* bt_settings) {
         FURI_LOG_W(TAG, "Failed to load settings, using defaults");
 
         bt_settings->enabled = false;
+        bt_settings->ble_mode = 0; /* NimbleModePeripheralCombined */
         bt_settings_save(bt_settings);
     }
 }

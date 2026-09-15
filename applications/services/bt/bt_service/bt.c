@@ -9,6 +9,7 @@
 #include <gui/elements.h>
 #include <assets_icons.h>
 #include <profiles/serial_profile.h>
+#include <extra_profiles/hid_profile_backend.h>
 #include <nimble_glue.h>
 
 #define TAG "BtSrv"
@@ -417,6 +418,22 @@ void bt_close_rpc_connection(Bt* bt) {
 }
 
 static void bt_change_profile(Bt* bt, BtMessage* message) {
+    if(bt->nimble_active) {
+        /* Backward compatibility (KNOW-609): the NimBLE host is already up with
+         * its GATT table (the combined mode also serves HID). Existing apps call
+         * bt_profile_start(ble_profile_hid_ext) then send with ble_profile_hid_*;
+         * those senders route to NimBLE through the HID backend registered at
+         * bring-up. Return a sentinel handle so the caller's furi_check(profile)
+         * passes, and do NOT call furi_hal_bt_change_app, which would reinit CPU2
+         * and break NimBLE's controller ownership. */
+        static FuriHalBleProfileBase nimble_profile;
+        nimble_profile.config = message->data.profile.template;
+        bt->current_profile = &nimble_profile;
+        if(message->profile_instance) *message->profile_instance = &nimble_profile;
+        if(message->result) *message->result = true;
+        return;
+    }
+
     if(furi_hal_bt_is_gatt_gap_supported()) {
         bt_settings_load(&bt->bt_settings);
 
@@ -485,6 +502,12 @@ static void bt_resume_default_profile(Bt* bt, BtMessage* message) {
 }
 
 static void bt_close_connection(Bt* bt) {
+    if(bt->nimble_active) {
+        /* On the NimBLE host, drop the link through the glue; never touch the
+         * stock CPU2 advertising path. */
+        nimble_glue_disconnect();
+        return;
+    }
     bt_close_rpc_connection(bt);
     furi_hal_bt_stop_advertising();
 }
@@ -614,6 +637,24 @@ static void bt_nimble_poll_callback(void* context) {
     }
 }
 
+// HID report backend that routes the stock ble_profile_hid_* senders to the
+// NimBLE HID GATT server, so existing apps (bad_usb, hid_app, u2f) keep working
+// unmodified on the NimBLE host (KNOW-609). Registered at bring-up when the mode
+// serves HID; ble_profile short-circuits to it before touching the CPU2 path.
+static const BleProfileHidBackend bt_nimble_hid_backend = {
+    .kb_press = nimble_glue_hid_kb_press,
+    .kb_release = nimble_glue_hid_kb_release,
+    .kb_release_all = nimble_glue_hid_kb_release_all,
+    .consumer_press = nimble_glue_hid_consumer_press,
+    .consumer_release = nimble_glue_hid_consumer_release,
+    .consumer_release_all = nimble_glue_hid_consumer_release_all,
+    .mouse_move = nimble_glue_hid_mouse_move,
+    .mouse_press = nimble_glue_hid_mouse_press,
+    .mouse_release = nimble_glue_hid_mouse_release,
+    .mouse_release_all = nimble_glue_hid_mouse_release_all,
+    .mouse_scroll = nimble_glue_hid_mouse_scroll,
+};
+
 // Acquire the raw HCI controller and start the NimBLE host. C2 stays alive on an
 // HCILayer radio even though furi_hal_bt_start_radio_stack() returns false, so
 // the controller can be acquired here. Returns true if the host started.
@@ -626,14 +667,20 @@ static bool bt_nimble_bringup(Bt* bt) {
         FURI_LOG_E(TAG, "Raw HCI controller acquire failed");
         return false;
     }
-    /* Selectable BLE mode (KNOW-606/TASK-607). Default to the combined
-     * serial + HID peripheral; a persisted BtSettings mode selector overrides
-     * this in a later step. */
-    NimbleMode mode = NimbleModePeripheralCombined;
+    /* Selectable BLE mode (KNOW-606/TASK-607) from the persisted setting; an
+     * out-of-range value falls back to the combined serial + HID peripheral. */
+    NimbleMode mode = (NimbleMode)bt->bt_settings.ble_mode;
+    if(mode >= NimbleModeCount) mode = NimbleModePeripheralCombined;
     if(!nimble_glue_start(mode)) {
         FURI_LOG_E(TAG, "NimBLE host start failed (mode %d)", mode);
         furi_hal_bt_hci_release();
         return false;
+    }
+
+    /* Back the stock ble_profile_hid_* API with NimBLE so existing HID apps work
+     * unmodified when this mode serves HID (KNOW-609). */
+    if(nimble_mode_has_hid(mode)) {
+        ble_profile_hid_set_backend(&bt_nimble_hid_backend);
     }
 
     bt->nimble_active = true;
@@ -643,7 +690,7 @@ static bool bt_nimble_bringup(Bt* bt) {
         furi_timer_alloc(bt_nimble_poll_callback, FuriTimerTypePeriodic, bt);
     furi_timer_start(bt->nimble_timer, furi_ms_to_ticks(400));
 
-    FURI_LOG_I(TAG, "NimBLE host started on the HCI Layer radio");
+    FURI_LOG_I(TAG, "NimBLE host started on the HCI Layer radio (mode %d)", mode);
     return true;
 }
 
@@ -678,6 +725,8 @@ int32_t bt_srv(void* p) {
     furi_record_create(RECORD_BT, bt);
 
     if(use_nimble) {
+        /* Load settings so bring-up sees the persisted BLE mode (and enabled). */
+        bt_settings_load(&bt->bt_settings);
         if(!bt_nimble_bringup(bt)) {
             FURI_LOG_E(TAG, "NimBLE host bring-up failed; BLE unavailable");
             bt->status = BtStatusUnavailable;

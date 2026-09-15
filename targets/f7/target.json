@@ -20,6 +20,7 @@
     "linker_dependencies": [
         "print",
         "nimble",
+        "ble_profile",
         "flipper7",
         "furi",
         "freertos",
