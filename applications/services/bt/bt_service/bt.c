@@ -626,8 +626,12 @@ static bool bt_nimble_bringup(Bt* bt) {
         FURI_LOG_E(TAG, "Raw HCI controller acquire failed");
         return false;
     }
-    if(!nimble_glue_start()) {
-        FURI_LOG_E(TAG, "NimBLE host start failed");
+    /* Selectable BLE mode (KNOW-606/TASK-607). Default to the combined
+     * serial + HID peripheral; a persisted BtSettings mode selector overrides
+     * this in a later step. */
+    NimbleMode mode = NimbleModePeripheralCombined;
+    if(!nimble_glue_start(mode)) {
+        FURI_LOG_E(TAG, "NimBLE host start failed (mode %d)", mode);
         furi_hal_bt_hci_release();
         return false;
     }

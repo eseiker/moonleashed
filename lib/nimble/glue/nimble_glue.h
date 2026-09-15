@@ -17,9 +17,27 @@
 extern "C" {
 #endif
 
-/* Bring up the NimBLE host on the already-acquired LL_ONLY controller and start
- * its event thread. Returns false if the host thread could not be created. */
-bool nimble_glue_start(void);
+/* Selectable BLE operating mode (KNOW-606). The bt service picks one instead of
+ * hard-coding a behavior. Peripheral variants ship now; central and raw-HCI are
+ * declared slots for later. */
+typedef enum {
+    NimbleModePeripheralCombined = 0, /* advertise Serial Service + HID together (default) */
+    NimbleModePeripheralSerial, /* Serial Service only */
+    NimbleModePeripheralHid, /* HID only (+ Device Information + Battery) */
+    NimbleModeCentral, /* future: scan/initiate instead of advertise */
+    NimbleModeRawHci, /* future: hand the controller to a raw-HCI consumer */
+    NimbleModeCount,
+} NimbleMode;
+
+/* True if the mode registers/advertises the Serial Service. */
+bool nimble_mode_has_serial(NimbleMode mode);
+/* True if the mode registers/advertises the HID service. */
+bool nimble_mode_has_hid(NimbleMode mode);
+
+/* Bring up the NimBLE host on the already-acquired LL_ONLY controller in the
+ * given mode and start its event thread. Returns false if the mode is not
+ * implemented or the host thread could not be created. */
+bool nimble_glue_start(NimbleMode mode);
 
 /* True once NimBLE finished controller startup and called its sync callback. */
 bool nimble_glue_is_synced(void);

@@ -66,7 +66,16 @@ static struct {
     uint8_t addr_type;
     uint8_t addr[6];
     uint8_t last_addr[6];
+    NimbleMode mode;
 } glue;
+
+bool nimble_mode_has_serial(NimbleMode mode) {
+    return mode == NimbleModePeripheralCombined || mode == NimbleModePeripheralSerial;
+}
+
+bool nimble_mode_has_hid(NimbleMode mode) {
+    return mode == NimbleModePeripheralCombined || mode == NimbleModePeripheralHid;
+}
 
 static struct ble_hs_stop_listener stop_listener;
 static FuriSemaphore* stop_sem;
@@ -88,8 +97,10 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             glue.bonded = false;
             glue.pairing = false;
             glue.conn_handle = event->connect.conn_handle;
-            serial_gatt_set_conn(event->connect.conn_handle, true);
-            hid_gatt_set_conn(event->connect.conn_handle, true);
+            if(nimble_mode_has_serial(glue.mode))
+                serial_gatt_set_conn(event->connect.conn_handle, true);
+            if(nimble_mode_has_hid(glue.mode))
+                hid_gatt_set_conn(event->connect.conn_handle, true);
             FURI_LOG_I(TAG, "Central connected, handle %u", event->connect.conn_handle);
         } else {
             FURI_LOG_W(TAG, "Connect failed: %d", event->connect.status);
@@ -103,8 +114,8 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         glue.pairing = false;
         glue.bonded = false;
         glue.conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        serial_gatt_set_conn(0, false);
-        hid_gatt_set_conn(0, false);
+        if(nimble_mode_has_serial(glue.mode)) serial_gatt_set_conn(0, false);
+        if(nimble_mode_has_hid(glue.mode)) hid_gatt_set_conn(0, false);
         serial_store_save(); /* persist any CCCDs written during the connection */
         start_advertise();
         break;
@@ -115,7 +126,8 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         break;
 
     case BLE_GAP_EVENT_NOTIFY_TX:
-        serial_gatt_on_notify_tx(event->notify_tx.attr_handle, event->notify_tx.status);
+        if(nimble_mode_has_serial(glue.mode))
+            serial_gatt_on_notify_tx(event->notify_tx.attr_handle, event->notify_tx.status);
         break;
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
@@ -178,13 +190,21 @@ static void start_advertise(void) {
     memset(&fields, 0, sizeof(fields));
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
-    /* Advertise the Serial Service UUID (first, so the verified companion scan
-     * still finds it) and the HID Service UUID 0x1812 so a phone offers the
-     * Flipper as a BLE input device. */
-    uint16_t svc16 = 0x3080 | (uint16_t)furi_hal_version_get_hw_color();
-    ble_uuid16_t adv_uuids[2] = {BLE_UUID16_INIT(svc16), BLE_UUID16_INIT(0x1812)};
+    /* Advertise the service UUIDs the active mode exposes. The Serial Service
+     * UUID (0x3080 | hw_color) goes first so the verified companion scan still
+     * finds it; the HID Service UUID (0x1812) lets a phone offer the Flipper as a
+     * BLE input device. */
+    ble_uuid16_t adv_uuids[2];
+    uint8_t n_uuids = 0;
+    if(nimble_mode_has_serial(glue.mode)) {
+        uint16_t svc16 = 0x3080 | (uint16_t)furi_hal_version_get_hw_color();
+        adv_uuids[n_uuids++] = (ble_uuid16_t)BLE_UUID16_INIT(svc16);
+    }
+    if(nimble_mode_has_hid(glue.mode)) {
+        adv_uuids[n_uuids++] = (ble_uuid16_t)BLE_UUID16_INIT(0x1812);
+    }
     fields.uuids16 = adv_uuids;
-    fields.num_uuids16 = 2;
+    fields.num_uuids16 = n_uuids;
     fields.uuids16_is_complete = 1;
 
     const char* name = furi_hal_version_get_device_name_ptr();
@@ -202,7 +222,9 @@ static void start_advertise(void) {
 
     struct ble_hs_adv_fields rsp;
     memset(&rsp, 0, sizeof(rsp));
-    rsp.appearance = 0x03C1; /* HID Keyboard, so hosts offer BLE HID pairing */
+    /* Advertise a keyboard appearance when HID is exposed so hosts offer BLE HID
+     * pairing; otherwise the generic Flipper appearance. */
+    rsp.appearance = nimble_mode_has_hid(glue.mode) ? 0x03C1 : 0x8600;
     rsp.appearance_is_present = 1;
     ble_gap_adv_rsp_set_fields(&rsp);
 
@@ -308,9 +330,15 @@ static int32_t host_task(void* context) {
     return 0;
 }
 
-bool nimble_glue_start(void) {
+bool nimble_glue_start(NimbleMode mode) {
+    if(mode == NimbleModeCentral || mode == NimbleModeRawHci || mode >= NimbleModeCount) {
+        FURI_LOG_E(TAG, "NimBLE mode %d not implemented", mode);
+        return false;
+    }
+
     memset(&glue, 0, sizeof(glue));
     glue.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    glue.mode = mode;
 
     nimble_port_init();
     ble_hs_cfg.reset_cb = on_reset;
@@ -335,20 +363,24 @@ bool nimble_glue_start(void) {
     const char* name = furi_hal_version_get_device_name_ptr();
     ble_svc_gap_device_name_set(name ? name : "Flipper");
 
-    int rc = serial_gatt_register();
-    if(rc != 0) {
-        FURI_LOG_E(TAG, "serial_gatt_register failed: %d", rc);
-        return false;
+    /* Register the GATT services the selected mode uses. NimBLE fixes the GATT
+     * table before the host starts, so the whole set is registered here. In the
+     * combined mode the Serial Service and HID coexist on one connection. */
+    if(nimble_mode_has_serial(mode)) {
+        int rc = serial_gatt_register();
+        if(rc != 0) {
+            FURI_LOG_E(TAG, "serial_gatt_register failed: %d", rc);
+            return false;
+        }
+        serial_gatt_init();
     }
-    serial_gatt_init();
 
-    /* Register the HID (+ Device Information + Battery) services in the same GATT
-     * table so the Serial Service and BLE HID coexist on one connection. NimBLE
-     * fixes the table before the host starts, so both are added here at boot. */
-    rc = hid_gatt_register();
-    if(rc != 0) {
-        FURI_LOG_E(TAG, "hid_gatt_register failed: %d", rc);
-        return false;
+    if(nimble_mode_has_hid(mode)) {
+        int rc = hid_gatt_register();
+        if(rc != 0) {
+            FURI_LOG_E(TAG, "hid_gatt_register failed: %d", rc);
+            return false;
+        }
     }
 
     glue.host_run = true;
