@@ -38,6 +38,11 @@ void serial_gatt_set_conn(uint16_t conn_handle, bool connected);
  * send path can advance to the next chunk. */
 void serial_gatt_on_notify_tx(uint16_t attr_handle, int status);
 
+/* Handle a CCCD subscribe/unsubscribe (BLE_GAP_EVENT_SUBSCRIBE). Opens the RPC
+ * session lazily when the peer subscribes to a Serial Service characteristic, so
+ * a HID-only host never engages the serial/RPC path. */
+void serial_gatt_on_subscribe(uint16_t attr_handle, bool subscribed);
+
 /* Total bytes the central has written to the RX characteristic on the current
  * connection. B1 introspection for the FAP UI. */
 uint32_t serial_gatt_rx_bytes(void);

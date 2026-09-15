@@ -77,21 +77,16 @@ void nimble_glue_disconnect(void);
 /* Clear all bonds: the in-RAM store and the persisted file. */
 void nimble_glue_forget_bonds(void);
 
-/* BLE HID report senders (TASK-604), routed to the HID GATT server that is
- * registered alongside the Serial Service. The keyboard button is
- * (mods << 8) | keycode, matching the stock ble_profile_hid API. Each returns
+/* BLE HID (TASK-604 / TASK-612): send one complete input report to the HID
+ * GATT server registered alongside the Serial Service. report_id 1 = keyboard
+ * (8 bytes), 2 = mouse (4 bytes), 3 = consumer (2 bytes) — the byte layout the
+ * stock ble_profile_hid code builds. The bt service feeds this from the
+ * ble_gatt_* host shim, so HID FAPs (hid_app, bad_usb) run unmodified. Returns
  * true if the notification was queued (a central must be connected). */
-bool nimble_glue_hid_kb_press(uint16_t button);
-bool nimble_glue_hid_kb_release(uint16_t button);
-bool nimble_glue_hid_kb_release_all(void);
-bool nimble_glue_hid_consumer_press(uint16_t button);
-bool nimble_glue_hid_consumer_release(uint16_t button);
-bool nimble_glue_hid_consumer_release_all(void);
-bool nimble_glue_hid_mouse_move(int8_t dx, int8_t dy);
-bool nimble_glue_hid_mouse_press(uint8_t button);
-bool nimble_glue_hid_mouse_release(uint8_t button);
-bool nimble_glue_hid_mouse_release_all(void);
-bool nimble_glue_hid_mouse_scroll(int8_t delta);
+bool nimble_glue_hid_input_report(uint8_t report_id, const uint8_t* data, uint16_t len);
+
+/* Update the Battery Level characteristic (0..100) and notify the peer. */
+bool nimble_glue_hid_battery_level(uint8_t level);
 
 /* True if the HCI transport latched a fault. */
 bool nimble_glue_faulted(void);

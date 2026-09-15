@@ -100,6 +100,10 @@ struct Bt {
     FuriTimer* nimble_timer;
     BtStatus nimble_last_status;
     bool nimble_pin_shown;
+    // True when current_profile is a live instance returned by an app profile
+    // template's start() (run over the ble_gatt_* host shim, TASK-612) and must
+    // be stopped with current_profile->config->stop() before it is replaced.
+    bool nimble_profile_started;
 };
 
 /** Open a new RPC connection

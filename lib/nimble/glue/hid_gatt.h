@@ -30,20 +30,15 @@ int hid_gatt_register(void);
  * glue GAP connect/disconnect handler, alongside serial_gatt_set_conn(). */
 void hid_gatt_set_conn(uint16_t conn_handle, bool connected);
 
-/* Keyboard/consumer/mouse report senders. Each updates the held report and
- * notifies the matching input-report characteristic. button for the keyboard is
- * (mods << 8) | keycode, matching the stock ble_profile_hid API. Return true if
- * the notification was queued. */
-bool hid_gatt_kb_press(uint16_t button);
-bool hid_gatt_kb_release(uint16_t button);
-bool hid_gatt_kb_release_all(void);
-bool hid_gatt_consumer_press(uint16_t button);
-bool hid_gatt_consumer_release(uint16_t button);
-bool hid_gatt_consumer_release_all(void);
-bool hid_gatt_mouse_move(int8_t dx, int8_t dy);
-bool hid_gatt_mouse_press(uint8_t button);
-bool hid_gatt_mouse_release(uint8_t button);
-bool hid_gatt_mouse_release_all(void);
-bool hid_gatt_mouse_scroll(int8_t delta);
+/* Send one complete input report, exactly as the stock ble_profile_hid code
+ * builds it: report_id 1 = keyboard (8 bytes), 2 = mouse (4 bytes),
+ * 3 = consumer (2 bytes). The bytes are copied into the held report (so a READ
+ * returns the latest value) and a notification is queued for the host thread.
+ * Returns true if the notification was queued. Safe to call from any thread. */
+bool hid_gatt_input_report(uint8_t report_id, const uint8_t* data, uint16_t len);
+
+/* Update the Battery Level characteristic (0..100) and notify a subscribed
+ * peer. Returns true if the notification was queued. */
+bool hid_gatt_battery_level(uint8_t level);
 
 #endif /* HID_GATT_H_ */

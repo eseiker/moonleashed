@@ -18,10 +18,6 @@ typedef struct {
 /** Hid Keyboard Profile descriptor */
 extern const FuriHalBleProfileTemplate* ble_profile_hid;
 
-/* The optional HID report backend (used to route ble_profile_hid_* to a NimBLE
- * host) is declared in the firmware-internal header hid_profile_backend.h, kept
- * out of the app-facing SDK so the public API is unchanged. */
-
 /** Press keyboard button
  *
  * @param profile   profile instance

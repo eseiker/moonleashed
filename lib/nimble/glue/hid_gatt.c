@@ -23,6 +23,8 @@
 
 #include "os/os_mbuf.h"
 #include "nimble/ble.h"
+#include "nimble/nimble_npl.h"
+#include "nimble/nimble_port.h"
 #include "host/ble_hs.h"
 #include "host/ble_hs_mbuf.h"
 #include "host/ble_uuid.h"
@@ -181,6 +183,8 @@ static HidConsumerReport s_consumer;
 static uint8_t s_battery_level = 100;
 
 static uint16_t s_conn = BLE_HS_CONN_HANDLE_NONE;
+
+static void hid_tx_init(void);
 
 /* Report Reference descriptor value {report_id, report_type=input}. The report id
  * is passed through the descriptor's arg. */
@@ -369,6 +373,7 @@ static const struct ble_gatt_svc_def svcs[] = {
 };
 
 int hid_gatt_register(void) {
+    hid_tx_init();
     int rc = ble_gatts_count_cfg(svcs);
     if(rc != 0) {
         FURI_LOG_E(TAG, "count_cfg failed: %d", rc);
@@ -384,6 +389,13 @@ int hid_gatt_register(void) {
 
 void hid_gatt_set_conn(uint16_t conn_handle, bool connected) {
     if(connected) {
+        FURI_LOG_I(
+            TAG,
+            "hid handles kb=%u mouse=%u cons=%u batt=%u",
+            h_report_kb,
+            h_report_mouse,
+            h_report_consumer,
+            h_battery);
         s_conn = conn_handle;
         memset(&s_kb, 0, sizeof(s_kb));
         memset(&s_mouse, 0, sizeof(s_mouse));
@@ -393,93 +405,126 @@ void hid_gatt_set_conn(uint16_t conn_handle, bool connected) {
     }
 }
 
-/* Notify the held report on its input characteristic. */
+/* Deferred HID report TX (KNOW-611).
+ *
+ * The stock ble_profile_hid_* senders are called on the caller app's thread
+ * (e.g. hid_app / bad_usb, a 2 KB FAP stack). ble_gatts_notify_custom drives a
+ * deep NimBLE call chain (ATT -> L2CAP -> HCI transport) that overflows a 2 KB
+ * stack, so calling it directly there crashes with a stack-guard furi_check. We
+ * therefore copy the report and hand it to the NimBLE host thread (a 4 KB stack,
+ * the correct place for host operations) via an NPL event; the host thread does
+ * the actual notify. The caller only does a shallow enqueue. */
+#define HID_TX_QUEUE_LEN 16
+
+typedef struct {
+    uint16_t handle;
+    uint16_t len;
+    uint8_t data[8];
+} HidTxItem;
+
+static HidTxItem s_txq[HID_TX_QUEUE_LEN];
+static volatile uint8_t s_txq_head;
+static volatile uint8_t s_txq_tail;
+static FuriMutex* s_txq_mtx;
+static struct ble_npl_event s_tx_event;
+static bool s_tx_ready;
+
+/* Runs on the NimBLE host thread: drain queued reports and notify. */
+static void hid_tx_event_cb(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    for(;;) {
+        HidTxItem item;
+        furi_mutex_acquire(s_txq_mtx, FuriWaitForever);
+        if(s_txq_head == s_txq_tail) {
+            furi_mutex_release(s_txq_mtx);
+            break;
+        }
+        item = s_txq[s_txq_tail];
+        s_txq_tail = (s_txq_tail + 1) % HID_TX_QUEUE_LEN;
+        furi_mutex_release(s_txq_mtx);
+
+        if(s_conn == BLE_HS_CONN_HANDLE_NONE) continue;
+        struct os_mbuf* om = ble_hs_mbuf_from_flat(item.data, item.len);
+        if(!om) {
+            FURI_LOG_E(TAG, "tx_cb mbuf fail");
+            continue;
+        }
+        int rc = ble_gatts_notify_custom(s_conn, item.handle, om);
+        FURI_LOG_D(TAG, "tx_cb notify h=%u len=%u rc=%d", item.handle, item.len, rc);
+    }
+}
+
+/* Set up the deferred-TX primitives once. Safe to call from hid_gatt_register. */
+static void hid_tx_init(void) {
+    if(s_tx_ready) return;
+    if(!s_txq_mtx) s_txq_mtx = furi_mutex_alloc(FuriMutexTypeNormal);
+    ble_npl_event_init(&s_tx_event, hid_tx_event_cb, NULL);
+    s_txq_head = 0;
+    s_txq_tail = 0;
+    s_tx_ready = true;
+}
+
+/* Caller (app) thread: copy the report and wake the host thread to send it. */
 static bool notify_report(uint16_t handle, const void* data, uint16_t len) {
-    if(s_conn == BLE_HS_CONN_HANDLE_NONE) return false;
-    struct os_mbuf* om = ble_hs_mbuf_from_flat(data, len);
-    if(!om) return false;
-    return ble_gatts_notify_custom(s_conn, handle, om) == 0;
-}
+    if(!s_tx_ready || handle == 0 || s_conn == BLE_HS_CONN_HANDLE_NONE) return false;
+    if(len > sizeof(((HidTxItem*)0)->data)) len = sizeof(((HidTxItem*)0)->data);
 
-bool hid_gatt_kb_press(uint16_t button) {
-    for(uint8_t i = 0; i < HID_KB_MAX_KEYS; i++) {
-        if(s_kb.key[i] == 0) {
-            s_kb.key[i] = button & 0xFF;
-            break;
-        }
+    furi_mutex_acquire(s_txq_mtx, FuriWaitForever);
+    uint8_t next = (s_txq_head + 1) % HID_TX_QUEUE_LEN;
+    if(next == s_txq_tail) {
+        furi_mutex_release(s_txq_mtx); /* queue full: drop this report */
+        return false;
     }
-    s_kb.mods |= (button >> 8);
-    return notify_report(h_report_kb, &s_kb, sizeof(s_kb));
+    s_txq[s_txq_head].handle = handle;
+    s_txq[s_txq_head].len = len;
+    memcpy(s_txq[s_txq_head].data, data, len);
+    s_txq_head = next;
+    furi_mutex_release(s_txq_mtx);
+
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &s_tx_event);
+    return true;
 }
 
-bool hid_gatt_kb_release(uint16_t button) {
-    for(uint8_t i = 0; i < HID_KB_MAX_KEYS; i++) {
-        if(s_kb.key[i] == (button & 0xFF)) {
-            s_kb.key[i] = 0;
-            break;
-        }
+/* The app-side ble_profile_hid_* code (statically linked into each HID FAP,
+ * KNOW-613) builds the complete report itself and pushes it through the
+ * exported ble_gatt_characteristic_update, which the bt service's GATT host
+ * shim forwards here with the Report Reference id. We keep a copy so a READ of
+ * the Report characteristic returns the latest value, then notify. */
+bool hid_gatt_input_report(uint8_t report_id, const uint8_t* data, uint16_t len) {
+    if(!data || len == 0) return false;
+
+    uint16_t handle;
+    void* held;
+    uint16_t held_len;
+    switch(report_id) {
+    case HID_REPORT_ID_KEYBOARD:
+        handle = h_report_kb;
+        held = &s_kb;
+        held_len = sizeof(s_kb);
+        break;
+    case HID_REPORT_ID_MOUSE:
+        handle = h_report_mouse;
+        held = &s_mouse;
+        held_len = sizeof(s_mouse);
+        break;
+    case HID_REPORT_ID_CONSUMER:
+        handle = h_report_consumer;
+        held = &s_consumer;
+        held_len = sizeof(s_consumer);
+        break;
+    default:
+        FURI_LOG_W(TAG, "unknown report id %u", report_id);
+        return false;
     }
-    s_kb.mods &= ~(button >> 8);
-    return notify_report(h_report_kb, &s_kb, sizeof(s_kb));
+
+    if(len > held_len) len = held_len;
+    memcpy(held, data, len);
+    FURI_LOG_D(TAG, "input report id=%u len=%u", report_id, len);
+    return notify_report(handle, data, len);
 }
 
-bool hid_gatt_kb_release_all(void) {
-    memset(&s_kb, 0, sizeof(s_kb));
-    return notify_report(h_report_kb, &s_kb, sizeof(s_kb));
-}
-
-bool hid_gatt_consumer_press(uint16_t button) {
-    for(uint8_t i = 0; i < HID_CONSUMER_KEYS; i++) {
-        if(s_consumer.key[i] == 0) {
-            s_consumer.key[i] = button;
-            break;
-        }
-    }
-    return notify_report(h_report_consumer, &s_consumer, sizeof(s_consumer));
-}
-
-bool hid_gatt_consumer_release(uint16_t button) {
-    for(uint8_t i = 0; i < HID_CONSUMER_KEYS; i++) {
-        if(s_consumer.key[i] == button) {
-            s_consumer.key[i] = 0;
-            break;
-        }
-    }
-    return notify_report(h_report_consumer, &s_consumer, sizeof(s_consumer));
-}
-
-bool hid_gatt_consumer_release_all(void) {
-    memset(&s_consumer, 0, sizeof(s_consumer));
-    return notify_report(h_report_consumer, &s_consumer, sizeof(s_consumer));
-}
-
-bool hid_gatt_mouse_move(int8_t dx, int8_t dy) {
-    s_mouse.x = dx;
-    s_mouse.y = dy;
-    bool ok = notify_report(h_report_mouse, &s_mouse, sizeof(s_mouse));
-    s_mouse.x = 0;
-    s_mouse.y = 0;
-    return ok;
-}
-
-bool hid_gatt_mouse_press(uint8_t button) {
-    s_mouse.btn |= button;
-    return notify_report(h_report_mouse, &s_mouse, sizeof(s_mouse));
-}
-
-bool hid_gatt_mouse_release(uint8_t button) {
-    s_mouse.btn &= ~button;
-    return notify_report(h_report_mouse, &s_mouse, sizeof(s_mouse));
-}
-
-bool hid_gatt_mouse_release_all(void) {
-    s_mouse.btn = 0;
-    return notify_report(h_report_mouse, &s_mouse, sizeof(s_mouse));
-}
-
-bool hid_gatt_mouse_scroll(int8_t delta) {
-    s_mouse.wheel = delta;
-    bool ok = notify_report(h_report_mouse, &s_mouse, sizeof(s_mouse));
-    s_mouse.wheel = 0;
-    return ok;
+bool hid_gatt_battery_level(uint8_t level) {
+    if(level > 100) level = 100;
+    s_battery_level = level;
+    return notify_report(h_battery, &s_battery_level, sizeof(s_battery_level));
 }

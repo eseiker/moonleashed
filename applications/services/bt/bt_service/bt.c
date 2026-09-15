@@ -9,7 +9,7 @@
 #include <gui/elements.h>
 #include <assets_icons.h>
 #include <profiles/serial_profile.h>
-#include <extra_profiles/hid_profile_backend.h>
+#include <gatt_host_shim.h>
 #include <nimble_glue.h>
 
 #define TAG "BtSrv"
@@ -168,6 +168,7 @@ Bt* bt_alloc(void) {
     bt->nimble_timer = NULL;
     bt->nimble_last_status = BtStatusUnavailable;
     bt->nimble_pin_shown = false;
+    bt->nimble_profile_started = false;
     // Keys storage
     bt->keys_storage = bt_keys_storage_alloc(BT_KEYS_STORAGE_PATH);
     // Alloc queue
@@ -417,20 +418,55 @@ void bt_close_rpc_connection(Bt* bt) {
     }
 }
 
+/* NimBLE host: stop the app profile instance started by bt_nimble_change_profile,
+ * mirroring furi_hal_bt_reinit (current_profile->config->stop). The serial
+ * sentinel is not an instance and needs no stop. */
+static void bt_nimble_stop_profile(Bt* bt) {
+    if(bt->nimble_profile_started && bt->current_profile) {
+        FURI_LOG_I(TAG, "NimBLE: stopping app profile");
+        bt->current_profile->config->stop(bt->current_profile);
+    }
+    bt->nimble_profile_started = false;
+    bt->current_profile = NULL;
+}
+
+/* Backward compatibility (KNOW-609, KNOW-613, TASK-612): HID FAPs link their own
+ * copy of lib/ble_profile, so the only firmware code they reach is bt_profile_*
+ * and the exported ble_gatt_* primitives. With the GATT host shim installed at
+ * bring-up, we run the requested template's start() exactly like the stock
+ * furi_hal_bt_start_app would: the FAP's ble_profile_hid_start builds its
+ * BleProfileHid over the shim (no CPU2 traffic), and its later ble_profile_hid_*
+ * senders pass their own `profile->config == ble_profile_hid` check and push
+ * reports through ble_gatt_characteristic_update -> shim -> NimBLE. Never call
+ * furi_hal_bt_change_app here: it would reinit CPU2 and break NimBLE's
+ * controller ownership. The serial profile is served natively by NimBLE, so
+ * ble_profile_serial gets a sentinel handle instead of a started instance. */
+static void bt_nimble_change_profile(Bt* bt, BtMessage* message) {
+    const FuriHalBleProfileTemplate* template = message->data.profile.template;
+    FuriHalBleProfileBase* instance = NULL;
+
+    bt_nimble_stop_profile(bt);
+
+    if(template == ble_profile_serial || !template) {
+        static FuriHalBleProfileBase nimble_serial_profile;
+        nimble_serial_profile.config = ble_profile_serial;
+        instance = &nimble_serial_profile;
+    } else if(ble_gatt_host_shim_active() && template->start) {
+        instance = template->start(message->data.profile.params);
+        bt->nimble_profile_started = (instance != NULL);
+        FURI_LOG_D(TAG, "NimBLE: app profile start -> %p", (void*)instance);
+    } else {
+        FURI_LOG_E(TAG, "NimBLE: GATT host shim not installed; profile unavailable");
+    }
+
+    bt->current_profile = instance;
+    if(message->profile_instance) *message->profile_instance = instance;
+    if(message->result) *message->result = instance != NULL;
+}
+
 static void bt_change_profile(Bt* bt, BtMessage* message) {
     if(bt->nimble_active) {
-        /* Backward compatibility (KNOW-609): the NimBLE host is already up with
-         * its GATT table (the combined mode also serves HID). Existing apps call
-         * bt_profile_start(ble_profile_hid_ext) then send with ble_profile_hid_*;
-         * those senders route to NimBLE through the HID backend registered at
-         * bring-up. Return a sentinel handle so the caller's furi_check(profile)
-         * passes, and do NOT call furi_hal_bt_change_app, which would reinit CPU2
-         * and break NimBLE's controller ownership. */
-        static FuriHalBleProfileBase nimble_profile;
-        nimble_profile.config = message->data.profile.template;
-        bt->current_profile = &nimble_profile;
-        if(message->profile_instance) *message->profile_instance = &nimble_profile;
-        if(message->result) *message->result = true;
+        bt_nimble_change_profile(bt, message);
         return;
     }
 
@@ -480,6 +516,9 @@ static void bt_suspend_profile(Bt* bt, BtMessage* message) {
     bool result = !bt->profile_suspended;
     if(result) {
         bt_close_connection(bt);
+        if(bt->nimble_active) {
+            bt_nimble_stop_profile(bt);
+        }
         /* furi_hal_bt_enter_ll_only() owns and frees the HAL profile next. */
         bt->current_profile = NULL;
         bt->profile_suspended = true;
@@ -637,22 +676,36 @@ static void bt_nimble_poll_callback(void* context) {
     }
 }
 
-// HID report backend that routes the stock ble_profile_hid_* senders to the
-// NimBLE HID GATT server, so existing apps (bad_usb, hid_app, u2f) keep working
-// unmodified on the NimBLE host (KNOW-609). Registered at bring-up when the mode
-// serves HID; ble_profile short-circuits to it before touching the CPU2 path.
-static const BleProfileHidBackend bt_nimble_hid_backend = {
-    .kb_press = nimble_glue_hid_kb_press,
-    .kb_release = nimble_glue_hid_kb_release,
-    .kb_release_all = nimble_glue_hid_kb_release_all,
-    .consumer_press = nimble_glue_hid_consumer_press,
-    .consumer_release = nimble_glue_hid_consumer_release,
-    .consumer_release_all = nimble_glue_hid_consumer_release_all,
-    .mouse_move = nimble_glue_hid_mouse_move,
-    .mouse_press = nimble_glue_hid_mouse_press,
-    .mouse_release = nimble_glue_hid_mouse_release,
-    .mouse_release_all = nimble_glue_hid_mouse_release_all,
-    .mouse_scroll = nimble_glue_hid_mouse_scroll,
+// GATT host shim (TASK-612 / KNOW-613): the ble_gatt_* primitives that the
+// FAP-embedded lib/ble_profile copies call are redirected here instead of the
+// CPU2 ACI. HID input reports (0x2A4D with an input Report Reference) and the
+// battery level (0x2A19) are mapped onto the NimBLE GATT server; everything else
+// (report map, HID info, device info strings) is already served statically by
+// NimBLE and is dropped. Runs on the updating app's thread; the glue only does
+// a shallow copy + event post, the NimBLE host thread sends.
+#define BT_UUID16_HID_REPORT        (0x2A4D)
+#define BT_UUID16_BATTERY_LEVEL     (0x2A19)
+#define BT_HID_REPORT_TYPE_INPUT    (0x01)
+
+static void bt_nimble_gatt_update_callback(
+    uint16_t char_uuid16,
+    uint16_t report_ref,
+    const uint8_t* data,
+    uint16_t len,
+    void* context) {
+    UNUSED(context);
+    if(char_uuid16 == BT_UUID16_HID_REPORT) {
+        if((report_ref >> 8) == BT_HID_REPORT_TYPE_INPUT) {
+            nimble_glue_hid_input_report((uint8_t)(report_ref & 0xFF), data, len);
+        }
+    } else if(char_uuid16 == BT_UUID16_BATTERY_LEVEL) {
+        if(data && len >= 1) nimble_glue_hid_battery_level(data[0]);
+    }
+}
+
+static const BleGattHostShim bt_nimble_gatt_shim = {
+    .on_update = bt_nimble_gatt_update_callback,
+    .context = NULL,
 };
 
 // Acquire the raw HCI controller and start the NimBLE host. C2 stays alive on an
@@ -677,13 +730,15 @@ static bool bt_nimble_bringup(Bt* bt) {
         return false;
     }
 
-    /* Back the stock ble_profile_hid_* API with NimBLE so existing HID apps work
-     * unmodified when this mode serves HID (KNOW-609). */
-    if(nimble_mode_has_hid(mode)) {
-        ble_profile_hid_set_backend(&bt_nimble_hid_backend);
-    }
+    /* Redirect the exported ble_gatt_* primitives away from the (absent) CPU2
+     * GATT server so app profile templates can start over NimBLE (KNOW-613).
+     * Installed in every mode: a HID app on a serial-only host then starts
+     * cleanly and its reports are dropped by the glue, instead of the app
+     * issuing ACI commands into a controller NimBLE owns. */
+    ble_gatt_host_shim_set(&bt_nimble_gatt_shim);
 
     bt->nimble_active = true;
+    bt->nimble_profile_started = false;
     bt->nimble_last_status = BtStatusOff;
     bt->nimble_pin_shown = false;
     bt->nimble_timer =
@@ -755,11 +810,14 @@ int32_t bt_srv(void* p) {
             if(bt->status_changed_cb) {
                 bt->status_changed_cb(bt->status, bt->status_changed_ctx);
             }
-        } else if(
-            message.type == BtMessageTypeUpdateBatteryLevel && !bt->profile_suspended &&
-            !bt->nimble_active) {
-            // Update battery level (stock CPU2 HID battery service; N/A under NimBLE)
-            furi_hal_bt_update_battery_level(message.data.battery_level);
+        } else if(message.type == BtMessageTypeUpdateBatteryLevel && !bt->profile_suspended) {
+            if(bt->nimble_active) {
+                // NimBLE serves the Battery Service itself
+                nimble_glue_hid_battery_level(message.data.battery_level);
+            } else {
+                // Stock CPU2 battery service
+                furi_hal_bt_update_battery_level(message.data.battery_level);
+            }
         } else if(
             message.type == BtMessageTypeUpdatePowerState && !bt->profile_suspended &&
             !bt->nimble_active) {

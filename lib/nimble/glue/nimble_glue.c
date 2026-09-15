@@ -130,6 +130,13 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             serial_gatt_on_notify_tx(event->notify_tx.attr_handle, event->notify_tx.status);
         break;
 
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        if(nimble_mode_has_serial(glue.mode))
+            serial_gatt_on_subscribe(
+                event->subscribe.attr_handle,
+                event->subscribe.cur_notify || event->subscribe.cur_indicate);
+        break;
+
     case BLE_GAP_EVENT_PASSKEY_ACTION:
         /* DISPLAY_ONLY IO cap with MITM: we pick a 6-digit passkey, show it on
          * the Flipper screen, and inject it; the phone types the same number. */
@@ -453,39 +460,15 @@ void nimble_glue_forget_bonds(void) {
     serial_store_forget();
 }
 
-/* BLE HID report senders — thin passthrough to the HID GATT server. */
-bool nimble_glue_hid_kb_press(uint16_t button) {
-    return hid_gatt_kb_press(button);
+/* BLE HID — thin passthrough to the HID GATT server. */
+bool nimble_glue_hid_input_report(uint8_t report_id, const uint8_t* data, uint16_t len) {
+    if(!nimble_mode_has_hid(glue.mode)) return false;
+    return hid_gatt_input_report(report_id, data, len);
 }
-bool nimble_glue_hid_kb_release(uint16_t button) {
-    return hid_gatt_kb_release(button);
-}
-bool nimble_glue_hid_kb_release_all(void) {
-    return hid_gatt_kb_release_all();
-}
-bool nimble_glue_hid_consumer_press(uint16_t button) {
-    return hid_gatt_consumer_press(button);
-}
-bool nimble_glue_hid_consumer_release(uint16_t button) {
-    return hid_gatt_consumer_release(button);
-}
-bool nimble_glue_hid_consumer_release_all(void) {
-    return hid_gatt_consumer_release_all();
-}
-bool nimble_glue_hid_mouse_move(int8_t dx, int8_t dy) {
-    return hid_gatt_mouse_move(dx, dy);
-}
-bool nimble_glue_hid_mouse_press(uint8_t button) {
-    return hid_gatt_mouse_press(button);
-}
-bool nimble_glue_hid_mouse_release(uint8_t button) {
-    return hid_gatt_mouse_release(button);
-}
-bool nimble_glue_hid_mouse_release_all(void) {
-    return hid_gatt_mouse_release_all();
-}
-bool nimble_glue_hid_mouse_scroll(int8_t delta) {
-    return hid_gatt_mouse_scroll(delta);
+
+bool nimble_glue_hid_battery_level(uint8_t level) {
+    if(!nimble_mode_has_hid(glue.mode)) return false;
+    return hid_gatt_battery_level(level);
 }
 
 bool nimble_glue_faulted(void) {

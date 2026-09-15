@@ -1,4 +1,6 @@
 #include "gatt.h"
+#include <gatt_host_shim.h>
+#include "event_dispatcher.h"
 #include <ble/ble.h>
 
 #include <furi.h>
@@ -12,6 +14,78 @@
 #else
 #define ble_gatt_strict_crash(message)
 #endif
+
+/* ---- Host shim (see gatt_host_shim.h) ------------------------------------
+ * While s_shim is set, every primitive below skips the CPU2 ACI call. Handles
+ * are synthetic and only need to be unique per instance; the Report Reference
+ * table lets an update be attributed to a specific HID report. */
+
+#define GATT_SHIM_HANDLE_FIRST (0x0100)
+#define GATT_SHIM_REF_MAX      (8)
+
+static const BleGattHostShim* s_shim = NULL;
+static uint16_t s_shim_next_handle = GATT_SHIM_HANDLE_FIRST;
+
+static struct {
+    uint16_t handle; /* 0 = free slot */
+    uint16_t report_ref;
+} s_shim_refs[GATT_SHIM_REF_MAX];
+
+void ble_gatt_host_shim_set(const BleGattHostShim* shim) {
+    if(shim) {
+        /* Service code (e.g. ble_svc_hid_start in a FAP) registers an event
+         * handler; the dispatcher init normally happens in gap_init, which never
+         * runs without the CPU2 host. Idempotent. */
+        ble_event_dispatcher_init();
+    }
+    s_shim = shim;
+}
+
+bool ble_gatt_host_shim_active(void) {
+    return s_shim != NULL;
+}
+
+static uint16_t ble_gatt_shim_alloc_handle(void) {
+    uint16_t handle = s_shim_next_handle++;
+    if(s_shim_next_handle == 0) s_shim_next_handle = GATT_SHIM_HANDLE_FIRST;
+    return handle;
+}
+
+static void ble_gatt_shim_ref_set(uint16_t handle, uint16_t report_ref) {
+    FURI_CRITICAL_ENTER();
+    for(size_t i = 0; i < GATT_SHIM_REF_MAX; i++) {
+        if(s_shim_refs[i].handle == 0) {
+            s_shim_refs[i].handle = handle;
+            s_shim_refs[i].report_ref = report_ref;
+            break;
+        }
+    }
+    FURI_CRITICAL_EXIT();
+}
+
+static void ble_gatt_shim_ref_clear(uint16_t handle) {
+    FURI_CRITICAL_ENTER();
+    for(size_t i = 0; i < GATT_SHIM_REF_MAX; i++) {
+        if(s_shim_refs[i].handle == handle) {
+            s_shim_refs[i].handle = 0;
+            s_shim_refs[i].report_ref = 0;
+        }
+    }
+    FURI_CRITICAL_EXIT();
+}
+
+static uint16_t ble_gatt_shim_ref_get(uint16_t handle) {
+    uint16_t report_ref = 0;
+    FURI_CRITICAL_ENTER();
+    for(size_t i = 0; i < GATT_SHIM_REF_MAX; i++) {
+        if(s_shim_refs[i].handle == handle) {
+            report_ref = s_shim_refs[i].report_ref;
+            break;
+        }
+    }
+    FURI_CRITICAL_EXIT();
+    return report_ref;
+}
 
 void ble_gatt_characteristic_init(
     uint16_t svc_handle,
@@ -33,6 +107,33 @@ void ble_gatt_characteristic_init(
     } else if(char_descriptor->data_prop_type == FlipperGattCharacteristicDataCallback) {
         char_descriptor->data.callback.fn(
             char_descriptor->data.callback.context, NULL, &char_data_size);
+    }
+
+    if(s_shim) {
+        char_instance->handle = ble_gatt_shim_alloc_handle();
+        char_instance->descriptor_handle = 0;
+        if(char_descriptor->descriptor_params) {
+            /* Read the descriptor value now: for HID reports it is the Report
+             * Reference {report_id, report_type}, and the FAP's context pointer
+             * is only valid during its ble_svc_hid_start. */
+            const BleGattCharacteristicDescriptorParams* desc = char_descriptor->descriptor_params;
+            uint8_t const* desc_data = NULL;
+            uint16_t desc_len = 0;
+            bool release_data = desc->data_callback.fn(desc->data_callback.context, &desc_data, &desc_len);
+            if(desc->uuid_type == UUID_TYPE_16 &&
+               desc->uuid.Char_UUID_16 == REPORT_REFERENCE_DESCRIPTOR_UUID && desc_data &&
+               desc_len == 2) {
+                ble_gatt_shim_ref_set(
+                    char_instance->handle, (uint16_t)desc_data[0] | ((uint16_t)desc_data[1] << 8));
+            }
+            if(release_data) {
+                free((void*)desc_data);
+            }
+            char_instance->descriptor_handle = ble_gatt_shim_alloc_handle();
+        }
+        FURI_LOG_D(
+            TAG, "shim: %s char -> handle %u", char_descriptor->name, char_instance->handle);
+        return;
     }
 
     tBleStatus status = aci_gatt_add_char(
@@ -86,6 +187,12 @@ void ble_gatt_characteristic_init(
 void ble_gatt_characteristic_delete(
     uint16_t svc_handle,
     BleGattCharacteristicInstance* char_instance) {
+    if(s_shim) {
+        ble_gatt_shim_ref_clear(char_instance->handle);
+        free((void*)char_instance->characteristic);
+        return;
+    }
+
     tBleStatus status = aci_gatt_del_char(svc_handle, char_instance->handle);
     if(status) {
         FURI_LOG_E(
@@ -120,6 +227,25 @@ bool ble_gatt_characteristic_update(
         release_data = char_descriptor->data.callback.fn(context, &char_data, &char_data_size);
     }
 
+    if(s_shim) {
+        /* Hand the value to the resident host instead of CPU2. Mirrors the
+         * stock return convention below: false means success. */
+        if(s_shim->on_update) {
+            uint16_t uuid16 =
+                (char_descriptor->uuid_type == UUID_TYPE_16) ? char_descriptor->uuid.Char_UUID_16 : 0;
+            s_shim->on_update(
+                uuid16,
+                ble_gatt_shim_ref_get(char_instance->handle),
+                char_data,
+                char_data_size,
+                s_shim->context);
+        }
+        if(release_data) {
+            free((void*)char_data);
+        }
+        return false;
+    }
+
     tBleStatus result;
     size_t retries_left = 1000;
     do {
@@ -150,6 +276,11 @@ bool ble_gatt_service_add(
     uint8_t Service_Type,
     uint8_t Max_Attribute_Records,
     uint16_t* Service_Handle) {
+    if(s_shim) {
+        *Service_Handle = ble_gatt_shim_alloc_handle();
+        return true;
+    }
+
     tBleStatus result = aci_gatt_add_service(
         Service_UUID_Type, Service_UUID, Service_Type, Max_Attribute_Records, Service_Handle);
     if(result) {
@@ -161,6 +292,10 @@ bool ble_gatt_service_add(
 }
 
 bool ble_gatt_service_delete(uint16_t svc_handle) {
+    if(s_shim) {
+        return true;
+    }
+
     tBleStatus result = aci_gatt_del_service(svc_handle);
     if(result) {
         FURI_LOG_E(TAG, "Failed to delete service: %x", result);

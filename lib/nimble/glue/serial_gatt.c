@@ -65,6 +65,8 @@ static RpcSession* s_session;
 static FuriSemaphore* s_tx_ack;
 static volatile bool s_disconnected;
 
+static void serial_gatt_ensure_session(void);
+
 static void notify_flow_credit(void) {
     if(s_conn == BLE_HS_CONN_HANDLE_NONE) return;
     size_t avail = s_session ? rpc_session_get_available_size(s_session) : SERIAL_DATA_LEN_MAX;
@@ -139,6 +141,7 @@ static int chr_access(
             if(len > sizeof(buf)) len = sizeof(buf);
             if(os_mbuf_copydata(ctxt->om, 0, len, buf) != 0) return BLE_ATT_ERR_UNLIKELY;
             s_rx_bytes += len;
+            serial_gatt_ensure_session(); /* peer is using the serial service */
             if(s_session) {
                 size_t fed = rpc_session_feed(s_session, buf, len, 1000);
                 if(fed != len) FURI_LOG_W(TAG, "RPC fed %zu of %u", fed, len);
@@ -254,24 +257,34 @@ void serial_gatt_deinit(void) {
     }
 }
 
+/* Open the RPC session lazily, only when the peer actually uses the Serial
+ * Service (subscribes to TX indications, or writes RX). A HID-only host never
+ * touches these characteristics, so it never spins up the RPC session — which
+ * previously ran on every connection and stormed flow-control notifications,
+ * destabilizing HID sessions. */
+static void serial_gatt_ensure_session(void) {
+    if(s_conn == BLE_HS_CONN_HANDLE_NONE || s_session || !s_rpc) return;
+    s_session = rpc_session_open(s_rpc, RpcOwnerBle);
+    if(s_session) {
+        rpc_session_set_context(s_session, NULL);
+        rpc_session_set_send_bytes_callback(s_session, rpc_send_cb);
+        rpc_session_set_buffer_is_empty_callback(s_session, rpc_buffer_is_empty_cb);
+        set_rpc_status(1);
+        notify_flow_credit();
+        FURI_LOG_D(TAG, "RPC session opened (serial in use)");
+    } else {
+        FURI_LOG_E(TAG, "rpc_session_open failed");
+    }
+}
+
 void serial_gatt_set_conn(uint16_t conn_handle, bool connected) {
     if(connected) {
         s_conn = conn_handle;
         s_disconnected = false;
         s_rx_bytes = 0;
         s_buff_credit = SERIAL_DATA_LEN_MAX;
-        if(s_rpc && !s_session) {
-            s_session = rpc_session_open(s_rpc, RpcOwnerBle);
-            if(s_session) {
-                rpc_session_set_context(s_session, NULL);
-                rpc_session_set_send_bytes_callback(s_session, rpc_send_cb);
-                rpc_session_set_buffer_is_empty_callback(s_session, rpc_buffer_is_empty_cb);
-                set_rpc_status(1);
-                notify_flow_credit();
-            } else {
-                FURI_LOG_E(TAG, "rpc_session_open failed");
-            }
-        }
+        /* Do NOT open the RPC session here; wait until the peer uses the Serial
+         * Service (see serial_gatt_on_subscribe / RX write). */
     } else {
         s_disconnected = true;
         if(s_tx_ack) furi_semaphore_release(s_tx_ack); /* unblock a pending TX */
@@ -281,6 +294,14 @@ void serial_gatt_set_conn(uint16_t conn_handle, bool connected) {
         }
         s_rpc_status = 0;
         s_conn = BLE_HS_CONN_HANDLE_NONE;
+    }
+}
+
+void serial_gatt_on_subscribe(uint16_t attr_handle, bool subscribed) {
+    /* The companion enables TX indications (and the flow-control notify) to talk
+     * RPC; that is our signal to bring the RPC session up. */
+    if(subscribed && (attr_handle == h_tx || attr_handle == h_flow || attr_handle == h_rpc)) {
+        serial_gatt_ensure_session();
     }
 }
 
