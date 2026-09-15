@@ -3,11 +3,13 @@
 
 #include <core/check.h>
 #include <furi_hal_bt.h>
+#include <furi_hal_bt_hci.h>
 #include <services/battery_service.h>
 #include <notification/notification_messages.h>
 #include <gui/elements.h>
 #include <assets_icons.h>
 #include <profiles/serial_profile.h>
+#include <nimble_glue.h>
 
 #define TAG "BtSrv"
 
@@ -159,6 +161,12 @@ Bt* bt_alloc(void) {
     bt->max_packet_size = BLE_PROFILE_SERIAL_PACKET_SIZE_MAX;
     bt->current_profile = NULL;
     bt->profile_suspended = false;
+    // Resident NimBLE host state (set true only if bt_nimble_bringup succeeds).
+    // Bt is malloc'd, not zeroed, so initialise explicitly.
+    bt->nimble_active = false;
+    bt->nimble_timer = NULL;
+    bt->nimble_last_status = BtStatusUnavailable;
+    bt->nimble_pin_shown = false;
     // Keys storage
     bt->keys_storage = bt_keys_storage_alloc(BT_KEYS_STORAGE_PATH);
     // Alloc queue
@@ -559,6 +567,82 @@ static void bt_init_keys_settings(Bt* bt) {
     bt_handle_reload_keys_settings(bt);
 }
 
+/* ---- Firmware-resident NimBLE host (HCILayer radio) ----------------------
+ * On a BLE HCI Layer radio the CPU2 has no host, so the stock profile path
+ * (furi_hal_bt_change_app etc.) cannot run. Instead the bt service brings up the
+ * vendored NimBLE host on CPU1 over the raw HCI transport. NimBLE owns the
+ * Serial Service GATT server and the RPC bridge (lib/nimble/glue); this service
+ * only mirrors the host state into the status bar and PIN screen. KNOW-597. */
+
+// Runs on the bt service thread (timer dispatcher). Mirrors NimBLE host state
+// into bt->status and the PIN screen by posting the same messages the stock GAP
+// callback would.
+static void bt_nimble_poll_callback(void* context) {
+    furi_assert(context);
+    Bt* bt = context;
+
+    BtStatus status;
+    if(nimble_glue_is_connected()) {
+        status = BtStatusConnected;
+    } else if(nimble_glue_is_advertising()) {
+        status = BtStatusAdvertising;
+    } else {
+        status = BtStatusOff;
+    }
+
+    if(status != bt->nimble_last_status) {
+        bt->nimble_last_status = status;
+        bt->status = status;
+        const BtMessage message = {.type = BtMessageTypeUpdateStatus};
+        furi_message_queue_put(bt->message_queue, &message, 0);
+    }
+
+    // Legacy passkey pairing shows a 6-digit code (DISPLAY_ONLY). Surface it on
+    // the PIN screen while pairing, and hide it once pairing ends.
+    if(nimble_glue_is_pairing()) {
+        if(!bt->nimble_pin_shown) {
+            bt->nimble_pin_shown = true;
+            const BtMessage message = {
+                .type = BtMessageTypePinCodeShow, .data.pin_code = nimble_glue_passkey()};
+            furi_message_queue_put(bt->message_queue, &message, 0);
+        }
+    } else if(bt->nimble_pin_shown) {
+        bt->nimble_pin_shown = false;
+        // UpdateStatus hides the PIN screen in the message loop.
+        const BtMessage message = {.type = BtMessageTypeUpdateStatus};
+        furi_message_queue_put(bt->message_queue, &message, 0);
+    }
+}
+
+// Acquire the raw HCI controller and start the NimBLE host. C2 stays alive on an
+// HCILayer radio even though furi_hal_bt_start_radio_stack() returns false, so
+// the controller can be acquired here. Returns true if the host started.
+static bool bt_nimble_bringup(Bt* bt) {
+    if(furi_hal_bt_hci_get_abi() != FURI_HAL_BT_HCI_ABI) {
+        FURI_LOG_E(TAG, "Raw HCI transport ABI mismatch; NimBLE unavailable");
+        return false;
+    }
+    if(!furi_hal_bt_hci_acquire(FURI_HAL_BT_HCI_ABI)) {
+        FURI_LOG_E(TAG, "Raw HCI controller acquire failed");
+        return false;
+    }
+    if(!nimble_glue_start()) {
+        FURI_LOG_E(TAG, "NimBLE host start failed");
+        furi_hal_bt_hci_release();
+        return false;
+    }
+
+    bt->nimble_active = true;
+    bt->nimble_last_status = BtStatusOff;
+    bt->nimble_pin_shown = false;
+    bt->nimble_timer =
+        furi_timer_alloc(bt_nimble_poll_callback, FuriTimerTypePeriodic, bt);
+    furi_timer_start(bt->nimble_timer, furi_ms_to_ticks(400));
+
+    FURI_LOG_I(TAG, "NimBLE host started on the HCI Layer radio");
+    return true;
+}
+
 int32_t bt_srv(void* p) {
     UNUSED(p);
     Bt* bt = bt_alloc();
@@ -572,15 +656,29 @@ int32_t bt_srv(void* p) {
         return 0;
     }
 
-    if(furi_hal_bt_start_radio_stack()) {
+    // start_radio_stack() brings up C2 but returns false on an HCILayer radio
+    // (its StackType is unsupported by the stock host); it deliberately leaves
+    // SHCI running, so the raw HCI controller is still usable afterwards.
+    bool radio_ok = furi_hal_bt_start_radio_stack();
+    bool use_nimble = !(radio_ok && furi_hal_bt_is_gatt_gap_supported());
+
+    if(!use_nimble) {
         bt_init_keys_settings(bt);
         furi_hal_bt_set_key_storage_change_callback(bt_on_key_storage_change_callback, bt);
-
-    } else {
-        FURI_LOG_E(TAG, "Radio stack start failed");
+    } else if(!radio_ok) {
+        FURI_LOG_W(TAG, "Stock radio stack unavailable; using NimBLE host over raw HCI");
     }
 
+    // Create the record before the (slower) NimBLE bring-up so consumers that
+    // block on furi_record_open(RECORD_BT) — e.g. desktop — are not stalled.
     furi_record_create(RECORD_BT, bt);
+
+    if(use_nimble) {
+        if(!bt_nimble_bringup(bt)) {
+            FURI_LOG_E(TAG, "NimBLE host bring-up failed; BLE unavailable");
+            bt->status = BtStatusUnavailable;
+        }
+    }
 
     BtMessage message;
 
@@ -604,10 +702,14 @@ int32_t bt_srv(void* p) {
             if(bt->status_changed_cb) {
                 bt->status_changed_cb(bt->status, bt->status_changed_ctx);
             }
-        } else if(message.type == BtMessageTypeUpdateBatteryLevel && !bt->profile_suspended) {
-            // Update battery level
+        } else if(
+            message.type == BtMessageTypeUpdateBatteryLevel && !bt->profile_suspended &&
+            !bt->nimble_active) {
+            // Update battery level (stock CPU2 HID battery service; N/A under NimBLE)
             furi_hal_bt_update_battery_level(message.data.battery_level);
-        } else if(message.type == BtMessageTypeUpdatePowerState && !bt->profile_suspended) {
+        } else if(
+            message.type == BtMessageTypeUpdatePowerState && !bt->profile_suspended &&
+            !bt->nimble_active) {
             furi_hal_bt_update_power_state(message.data.power_state_charging);
         } else if(message.type == BtMessageTypePinCodeShow && !bt->profile_suspended) {
             // Display PIN code
@@ -620,9 +722,17 @@ int32_t bt_srv(void* p) {
         } else if(message.type == BtMessageTypeSetProfile && !bt->profile_suspended) {
             bt_change_profile(bt, &message);
         } else if(message.type == BtMessageTypeDisconnect && !bt->profile_suspended) {
-            bt_close_connection(bt);
+            if(bt->nimble_active) {
+                nimble_glue_disconnect();
+            } else {
+                bt_close_connection(bt);
+            }
         } else if(message.type == BtMessageTypeForgetBondedDevices) {
-            bt_keys_storage_delete(bt->keys_storage);
+            if(bt->nimble_active) {
+                nimble_glue_forget_bonds();
+            } else {
+                bt_keys_storage_delete(bt->keys_storage);
+            }
         } else if(message.type == BtMessageTypeGetSettings) {
             bt_handle_get_settings(bt, &message);
         } else if(message.type == BtMessageTypeSetSettings && !bt->profile_suspended) {

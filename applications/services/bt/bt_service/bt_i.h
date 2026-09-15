@@ -93,6 +93,13 @@ struct Bt {
     void* status_changed_ctx;
     uint32_t pin;
     bool suppress_pin_screen;
+    // Firmware-resident NimBLE host (HCILayer radio, no CPU2 host — KNOW-597).
+    // When nimble_active, the stock CPU2 profile path is bypassed and a poll
+    // timer mirrors the NimBLE host state into the status bar and PIN screen.
+    bool nimble_active;
+    FuriTimer* nimble_timer;
+    BtStatus nimble_last_status;
+    bool nimble_pin_shown;
 };
 
 /** Open a new RPC connection

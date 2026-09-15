@@ -20,6 +20,15 @@ nimble_include_paths = [
     "#/lib/nimble/glue",
 ]
 
+# Expose only the plain-C glue header to the rest of the firmware (the bt service
+# includes <nimble_glue.h> to drive the host). The glue header pulls in no NimBLE
+# headers, so it does not leak MYNEWT_VAL macros into the -Wundef firmware build.
+env.Append(
+    CPPPATH=[
+        "#/lib/nimble/glue",
+    ],
+)
+
 libenv = env.Clone(FW_LIB_NAME="nimble")
 libenv.ApplyLibFlags()
 libenv.AppendUnique(
