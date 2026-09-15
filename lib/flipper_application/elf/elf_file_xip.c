@@ -56,9 +56,14 @@ void xip_region_init(XipRegion* region) {
 void xip_region_release(XipRegion* region) {
     furi_check(region);
     if(region->active) {
+        /* Multi-tenant: unpin this app's block so its pages can be evicted once no
+         * running app holds them. The directory entry stays, so a relaunch is a hit.
+         * (block_pages == 0 for the legacy single-tenant path; unpin is then a no-op
+         * because nothing was pinned.) */
+        xip_manager_unpin(region->base_addr, region->block_pages);
         xip_region_in_use = false;
         region->active = false;
-        FURI_LOG_D(TAG, "Region released");
+        FURI_LOG_D(TAG, "Region released (tenant unpinned)");
     }
 }
 
@@ -449,6 +454,16 @@ int xip_manager_put_tenant(const XipTenantEntry* entry) {
         }
     }
     return -1;
+}
+
+void xip_manager_update_hash(int index, uint32_t ram_addr_hash) {
+    if(!xip_mgr.attached || index < 0 || index >= XIP_MAX_TENANTS) return;
+    xip_mgr.dir.tenants[index].ram_addr_hash = ram_addr_hash;
+}
+
+void xip_manager_invalidate(int index) {
+    if(!xip_mgr.attached || index < 0 || index >= XIP_MAX_TENANTS) return;
+    xip_mgr.dir.tenants[index].valid = 0;
 }
 
 bool xip_manager_commit(void) {

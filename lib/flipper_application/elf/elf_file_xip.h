@@ -98,10 +98,14 @@ typedef struct {
  *  of FAP .text and .rodata sections.
  */
 typedef struct {
-    uint32_t base_addr; /**< Flash start address (page-aligned) */
-    uint32_t end_addr; /**< Flash end address */
-    uint32_t data_start; /**< Where section data begins (after cache header) */
+    uint32_t base_addr; /**< Flash start address (page-aligned). In the multi-tenant
+                             path this is the tenant's block base, not the region base. */
+    uint32_t end_addr; /**< Flash end address (block end in the multi-tenant path) */
+    uint32_t data_start; /**< Where section data begins (block base; no in-block header) */
     uint32_t next_free; /**< Next available address (bump pointer) */
+    uint32_t block_pages; /**< Tenant block size in flash pages (multi-tenant) */
+    int tenant_index; /**< Directory slot of this tenant, or -1 until committed */
+    uint32_t cached_ram_hash; /**< ram_addr_hash from the matched tenant (cache hit) */
     bool active; /**< Whether XIP is available */
     bool cache_valid; /**< True if cached XIP data matches current app */
     bool needs_rerelocation; /**< Cache hit but RAM addrs changed — patch in place */
@@ -142,6 +146,13 @@ uint32_t xip_manager_alloc_block(uint32_t pages);
 /** Store a tenant entry into a free directory slot in RAM. Returns the slot
  *  index, or -1 if the directory is full. */
 int xip_manager_put_tenant(const XipTenantEntry* entry);
+
+/** Update a tenant's cached ram_addr_hash in the RAM directory (after an
+ *  in-place re-relocation). Caller commits the directory afterwards. */
+void xip_manager_update_hash(int index, uint32_t ram_addr_hash);
+
+/** Invalidate a tenant slot in the RAM directory (frees its pages for reuse). */
+void xip_manager_invalidate(int index);
 
 /** Write the RAM directory back to its flash page (erase + write). */
 bool xip_manager_commit(void);

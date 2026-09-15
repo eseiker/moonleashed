@@ -205,11 +205,13 @@ static FlipperApplicationPreloadStatus
         /* Plugins are RAM-first like apps: they load into RAM when they fit,
          * and fall back to the XIP region only when RAM is short.
          *
-         * The region is single-tenant. If the parent app already holds it,
-         * xip_region_init() refuses the plugin and it loads into RAM, exactly as
-         * it did when plugins were excluded outright. A plugin that sets
-         * ForceXIP, such as a CLI command loaded top-level, skips the RAM check.
-         * Plugins get a smaller RAM margin than apps; see elf_setup_xip(). */
+         * The region is multi-tenant (TASK-573): a plugin gets its own
+         * page-aligned block alongside its parent app's block, so a parent
+         * holding XIP no longer forces its plugins into RAM. This is what lets a
+         * parent's heavy plugins (e.g. js_app's gui.js modules) leave RAM. A
+         * plugin that sets ForceXIP, such as a CLI command loaded top-level,
+         * skips the RAM check. Plugins get a smaller RAM margin than apps; see
+         * elf_setup_xip(). */
         if(app->manifest.stack_size == 0) {
             elf_file_set_xip_plugin(app->elf);
         }

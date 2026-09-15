@@ -1105,6 +1105,59 @@ static void elf_xip_assign_addresses(ELFFile* elf) {
     FURI_LOG_I(TAG, "XIP setup: %zu bytes allocated in flash", xip_region_used(&elf->xip_region));
 }
 
+/** Sum of flash bytes the XIP-eligible sections need, each 8-byte aligned. */
+static size_t elf_xip_total_size(ELFFile* elf) {
+    size_t total = 0;
+    ELFSectionDict_it_t it;
+    for(ELFSectionDict_it(it, elf->sections); !ELFSectionDict_end_p(it);
+        ELFSectionDict_next(it)) {
+        ELFSectionDict_itref_t* itref = ELFSectionDict_ref(it);
+        if(elf_section_is_xip_eligible(&itref->value)) {
+            total += (itref->value.size + 7) & ~(size_t)7;
+        }
+    }
+    return total;
+}
+
+/** Restore section addresses for a cache hit from a tenant's section table.
+ *  Returns true only if every XIP-eligible section is found in the tenant. */
+static bool elf_xip_restore_from_tenant(ELFFile* elf, const XipTenantEntry* t) {
+    ELFSectionDict_it_t it;
+    for(ELFSectionDict_it(it, elf->sections); !ELFSectionDict_end_p(it);
+        ELFSectionDict_next(it)) {
+        ELFSectionDict_itref_t* itref = ELFSectionDict_ref(it);
+        ELFSection* sec = &itref->value;
+
+        if(!elf_section_is_xip_eligible(sec)) {
+            sec->xip = false;
+            continue;
+        }
+
+        bool found = false;
+        for(uint32_t i = 0; i < t->section_count && i < XIP_CACHE_MAX_SECTIONS; i++) {
+            if(strncmp(itref->key, t->sections[i].name, 15) == 0 &&
+               sec->size == t->sections[i].size) {
+                sec->exec_addr = t->block_addr + t->sections[i].flash_offset;
+                sec->data = (void*)sec->exec_addr;
+                sec->xip = true;
+                found = true;
+                FURI_LOG_I(
+                    TAG,
+                    "Tenant restore: '%s' (%lu bytes) at 0x%08lX",
+                    itref->key,
+                    sec->size,
+                    sec->exec_addr);
+                break;
+            }
+        }
+        if(!found) {
+            FURI_LOG_W(TAG, "Tenant hit but section '%s' missing; forcing miss", itref->key);
+            return false;
+        }
+    }
+    return true;
+}
+
 static void elf_setup_xip(ELFFile* elf) {
     /* A warm XIP cache launch writes no flash, so it is safe with a BLE link up
      * and is not blocked here. A launch that does need a flash write, and finds a
@@ -1112,6 +1165,7 @@ static void elf_setup_xip(ELFFile* elf) {
      * the flash guard to take the link down, or refuses if none is set. */
     if(elf->xip_disabled) {
         memset(&elf->xip_region, 0, sizeof(XipRegion));
+        elf->xip_region.tenant_index = -1;
         FURI_LOG_D(TAG, "XIP disabled for this ELF");
         return;
     }
@@ -1154,6 +1208,7 @@ static void elf_setup_xip(ELFFile* elf) {
             max_block);
         /* Don't initialize XIP — all sections will be loaded to RAM */
         memset(&elf->xip_region, 0, sizeof(XipRegion));
+        elf->xip_region.tenant_index = -1;
         return;
     }
 
@@ -1161,64 +1216,93 @@ static void elf_setup_xip(ELFFile* elf) {
         FURI_LOG_I(TAG, "XIP forced by app (%zu bytes code)", remaining_alloc_size);
     }
 
-    xip_region_init(&elf->xip_region);
-    if(!elf->xip_region.active) return;
+    /* Multi-tenant XIP (TASK-573): the shared region holds several app images at
+     * once, each in its own page-aligned block, tracked by an on-flash directory.
+     * The per-ELF xip_region below describes only THIS app's block. */
+    memset(&elf->xip_region, 0, sizeof(XipRegion));
+    elf->xip_region.tenant_index = -1;
 
-    /* Check if cached XIP data is still valid for this app */
-    if(xip_cache_validate(
-           &elf->xip_region,
-           elf->fd,
-           elf->api_interface->api_version_major,
-           elf->api_interface->api_version_minor)) {
-        /* Cache hit — restore section layout from the cached header */
-        const XipCacheHeader* header = xip_cache_get_header(&elf->xip_region);
-        ELFSectionDict_it_t it;
-
-        for(ELFSectionDict_it(it, elf->sections); !ELFSectionDict_end_p(it);
-            ELFSectionDict_next(it)) {
-            ELFSectionDict_itref_t* itref = ELFSectionDict_ref(it);
-            ELFSection* sec = &itref->value;
-
-            if(!elf_section_is_xip_eligible(sec)) {
-                sec->xip = false;
-                continue;
-            }
-
-            /* Find this section in the cache header */
-            bool found = false;
-            for(uint32_t i = 0; i < header->section_count; i++) {
-                if(strncmp(itref->key, header->sections[i].name, 15) == 0 &&
-                   sec->size == header->sections[i].size) {
-                    sec->exec_addr = elf->xip_region.base_addr + header->sections[i].flash_offset;
-                    sec->data = (void*)sec->exec_addr;
-                    sec->xip = true;
-                    found = true;
-                    FURI_LOG_I(
-                        TAG,
-                        "Cache restore: '%s' (%lu bytes) at 0x%08lX",
-                        itref->key,
-                        sec->size,
-                        sec->exec_addr);
-                    break;
-                }
-            }
-
-            if(!found) {
-                /* Section not in cache — invalidate and do full load */
-                FURI_LOG_W(TAG, "Cache miss: section '%s' not found in cache", itref->key);
-                elf->xip_region.cache_valid = false;
-                break;
-            }
-        }
-
-        if(elf->xip_region.cache_valid) {
-            FURI_LOG_I(TAG, "XIP cache hit — skipping flash erase/write");
-            return;
-        }
-        FURI_LOG_I(TAG, "XIP cache invalidated during restore, doing fresh load");
+    if(!xip_manager_ensure()) {
+        FURI_LOG_W(TAG, "No XIP region available — falling back to RAM");
+        return;
     }
 
+    /* Identity for the directory lookup: file size, firmware API version, and the
+     * CRC32 of the whole FAP. Reset the file position after the CRC full read. */
+    uint32_t file_size = (uint32_t)storage_file_size(elf->fd);
+    uint32_t api_version = ((uint32_t)elf->api_interface->api_version_major << 16) |
+                           elf->api_interface->api_version_minor;
+    uint32_t file_crc = crc32_calc_file(elf->fd, NULL, NULL);
+    storage_file_seek(elf->fd, 0, true);
+
+    uint32_t page_size = furi_hal_flash_get_page_size();
+
+    /* Cache hit: an image with this identity already sits in a block. */
+    int idx = xip_manager_find(file_crc, file_size, api_version);
+    if(idx >= 0) {
+        const XipTenantEntry* t = xip_manager_tenant(idx);
+        elf->xip_region.base_addr = t->block_addr;
+        elf->xip_region.data_start = t->block_addr;
+        elf->xip_region.next_free = t->block_addr;
+        elf->xip_region.end_addr = t->block_addr + t->block_pages * page_size;
+        elf->xip_region.block_pages = t->block_pages;
+        elf->xip_region.active = true;
+        elf->xip_region.cache_valid = true;
+        elf->xip_region.needs_rerelocation = false;
+        elf->xip_region.tenant_index = idx;
+        elf->xip_region.cached_ram_hash = t->ram_addr_hash;
+
+        if(elf_xip_restore_from_tenant(elf, t)) {
+            xip_manager_touch(idx);
+            xip_manager_pin(t->block_addr, t->block_pages);
+            FURI_LOG_I(
+                TAG, "XIP tenant hit (slot %d) at 0x%08lX — no flash write", idx, t->block_addr);
+            return;
+        }
+
+        /* Section table mismatch despite matching identity: drop the stale slot
+         * and re-flash into a fresh block below. */
+        FURI_LOG_W(TAG, "Tenant restore failed; invalidating slot %d and reflashing", idx);
+        xip_manager_invalidate(idx);
+        memset(&elf->xip_region, 0, sizeof(XipRegion));
+        elf->xip_region.tenant_index = -1;
+    }
+
+    /* Cache miss: size a block from the eligible sections and allocate it,
+     * evicting least-recently-used non-pinned tenants if the region is full. */
+    size_t xip_total = elf_xip_total_size(elf);
+    if(xip_total == 0) {
+        FURI_LOG_D(TAG, "No XIP-eligible sections found");
+        memset(&elf->xip_region, 0, sizeof(XipRegion));
+        elf->xip_region.tenant_index = -1;
+        return;
+    }
+
+    uint32_t pages = (uint32_t)((xip_total + page_size - 1) / page_size);
+    uint32_t block = xip_manager_alloc_block(pages);
+    if(block == 0) {
+        FURI_LOG_W(TAG, "XIP alloc of %lu pages failed — falling back to RAM", pages);
+        memset(&elf->xip_region, 0, sizeof(XipRegion));
+        elf->xip_region.tenant_index = -1;
+        return;
+    }
+
+    elf->xip_region.base_addr = block;
+    elf->xip_region.data_start = block;
+    elf->xip_region.next_free = block;
+    elf->xip_region.end_addr = block + pages * page_size;
+    elf->xip_region.block_pages = pages;
+    elf->xip_region.active = true;
+    elf->xip_region.cache_valid = false;
+    elf->xip_region.tenant_index = -1;
+
     elf_xip_assign_addresses(elf);
+
+    /* assign_addresses releases the region on failure; pin only if it still holds. */
+    if(elf->xip_region.active) {
+        xip_manager_pin(block, pages);
+        FURI_LOG_I(TAG, "XIP tenant miss: block 0x%08lX (%lu pages)", block, pages);
+    }
 }
 
 ElfLoadSectionTableResult elf_file_load_section_table(ELFFile* elf) {
@@ -1302,13 +1386,12 @@ ElfLoadSectionTableResult elf_file_load_section_table(ELFFile* elf) {
              * flash pages that actually changed. */
             if(elf->xip_region.active && elf->xip_region.cache_valid) {
                 uint32_t current_hash = elf_compute_ram_addr_hash(elf);
-                const XipCacheHeader* hdr = xip_cache_get_header(&elf->xip_region);
-                if(!hdr || hdr->ram_addr_hash != current_hash) {
+                if(elf->xip_region.cached_ram_hash != current_hash) {
                     FURI_LOG_I(
                         TAG,
                         "RAM addresses changed (cached=%08lX, current=%08lX)"
                         " — will re-relocate XIP in place",
-                        hdr ? hdr->ram_addr_hash : 0,
+                        elf->xip_region.cached_ram_hash,
                         current_hash);
                     elf->xip_region.needs_rerelocation = true;
                 }
@@ -1955,22 +2038,16 @@ ELFFileLoadStatus elf_file_load_sections(ELFFile* elf) {
             }
         }
 
-        /* Update cache header with new ram_addr_hash.
-         * The header lives in the first flash page — read-modify-write. */
+        /* Persist the new ram_addr_hash in the tenant's directory entry. The
+         * directory lives in the region's first page, outside this tenant block. */
         if(status == ELFFileLoadStatusSuccess) {
-            uint8_t* page0 = aligned_malloc(4096, 8);
-            if(page0) {
-                memcpy(page0, (void*)elf->xip_region.base_addr, 4096);
-
-                XipCacheHeader* hdr = (XipCacheHeader*)page0;
-                hdr->ram_addr_hash = elf_compute_ram_addr_hash(elf);
-
-                int16_t page_num = furi_hal_flash_get_page_number(elf->xip_region.base_addr);
-                furi_hal_flash_erase(page_num);
-                furi_hal_flash_write_block(elf->xip_region.base_addr, page0, 4096);
-                aligned_free(page0);
-
-                FURI_LOG_I(TAG, "XIP cache header updated with new RAM address hash");
+            uint32_t new_hash = elf_compute_ram_addr_hash(elf);
+            xip_manager_update_hash(elf->xip_region.tenant_index, new_hash);
+            elf->xip_region.cached_ram_hash = new_hash;
+            if(!xip_manager_commit()) {
+                FURI_LOG_W(TAG, "Directory commit failed after re-relocation");
+            } else {
+                FURI_LOG_I(TAG, "Tenant RAM address hash updated in directory");
             }
         }
 
@@ -2071,16 +2148,19 @@ ELFFileLoadStatus elf_file_load_sections(ELFFile* elf) {
                 memmgr_get_free_heap(),
                 memmgr_heap_get_max_free_block());
 
-            /* Write cache header so next launch of the same app can skip erase/write */
+            /* Register this block as a directory tenant so the next launch of the
+             * same app is a cache hit that writes no flash. */
             if(status == ELFFileLoadStatusSuccess) {
-                XipCacheHeader cache_hdr;
-                memset(&cache_hdr, 0, sizeof(cache_hdr));
-                cache_hdr.magic = XIP_CACHE_MAGIC;
-                cache_hdr.file_size = (uint32_t)storage_file_size(elf->fd);
-                cache_hdr.file_crc32 = crc32_calc_file(elf->fd, NULL, NULL);
-                cache_hdr.api_version =
+                XipTenantEntry entry;
+                memset(&entry, 0, sizeof(entry));
+                entry.file_size = (uint32_t)storage_file_size(elf->fd);
+                entry.file_crc32 = crc32_calc_file(elf->fd, NULL, NULL);
+                entry.api_version =
                     ((uint32_t)elf->api_interface->api_version_major << 16) |
                     elf->api_interface->api_version_minor;
+                entry.block_addr = elf->xip_region.base_addr;
+                entry.block_pages = elf->xip_region.block_pages;
+                entry.ram_addr_hash = elf_compute_ram_addr_hash(elf);
 
                 uint32_t sec_idx = 0;
                 for(ELFSectionDict_it(it, elf->sections); !ELFSectionDict_end_p(it);
@@ -2088,20 +2168,30 @@ ELFFileLoadStatus elf_file_load_sections(ELFFile* elf) {
                     ELFSectionDict_itref_t* itref = ELFSectionDict_ref(it);
                     if(itref->value.xip && itref->value.size > 0 &&
                        sec_idx < XIP_CACHE_MAX_SECTIONS) {
-                        cache_hdr.sections[sec_idx].flash_offset =
+                        entry.sections[sec_idx].flash_offset =
                             itref->value.exec_addr - elf->xip_region.base_addr;
-                        cache_hdr.sections[sec_idx].size = itref->value.size;
-                        strncpy(
-                            cache_hdr.sections[sec_idx].name, itref->key, 15);
-                        cache_hdr.sections[sec_idx].name[15] = '\0';
+                        entry.sections[sec_idx].size = itref->value.size;
+                        strncpy(entry.sections[sec_idx].name, itref->key, 15);
+                        entry.sections[sec_idx].name[15] = '\0';
                         sec_idx++;
                     }
                 }
-                cache_hdr.section_count = sec_idx;
-                cache_hdr.ram_addr_hash = elf_compute_ram_addr_hash(elf);
+                entry.section_count = sec_idx;
 
-                if(!xip_cache_commit_header(&elf->xip_region, &cache_hdr)) {
-                    FURI_LOG_E(TAG, "XIP cache header write failed — app will re-flash on next launch");
+                int slot = xip_manager_put_tenant(&entry);
+                if(slot >= 0) {
+                    xip_manager_touch(slot);
+                    elf->xip_region.tenant_index = slot;
+                    elf->xip_region.cached_ram_hash = entry.ram_addr_hash;
+                    if(!xip_manager_commit()) {
+                        FURI_LOG_W(
+                            TAG, "Directory commit failed — app will re-flash next launch");
+                    } else {
+                        FURI_LOG_I(TAG, "XIP tenant registered in slot %d", slot);
+                    }
+                } else {
+                    FURI_LOG_W(
+                        TAG, "Directory full — tenant not cached (will re-flash next launch)");
                 }
             }
         }
