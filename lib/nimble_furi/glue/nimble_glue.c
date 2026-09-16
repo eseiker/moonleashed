@@ -54,6 +54,10 @@ extern void npl_furi_shutdown(void);
  * identity address. We use it to keep NimBLE's SM crypto in sync with the public
  * address we write into the controller after sync. */
 extern void ble_hs_id_set_pub(const uint8_t* pub_addr);
+/* GATT resource counters (ble_hs_priv.h). See gatt_rebuild_now. */
+extern uint16_t ble_hs_max_attrs;
+extern uint16_t ble_hs_max_services;
+extern uint16_t ble_hs_max_client_configs;
 
 static struct {
     FuriThread* host;
@@ -738,6 +742,15 @@ static void gatt_rebuild_now(void) {
         maybe_advertise();
         return;
     }
+    /* NimBLE 1.10.0's ble_gatts_reset() leaves the resource counters that
+     * ble_gatts_count_cfg() accumulates, so every rebuild would re-count the
+     * whole table on top and grow the attribute/service/CCCD pools until the
+     * heap runs out. Upstream fixed this after 1.10.0 (af4baa41, "reset
+     * resource counts in ble_gatts_reset()"); until the pinned tag includes it,
+     * clear them here. Harmless on versions that already do. */
+    ble_hs_max_attrs = 0;
+    ble_hs_max_services = 0;
+    ble_hs_max_client_configs = 0;
     ble_svc_gap_init();
     ble_svc_gatt_init();
     if(nimble_mode_has_serial(glue.mode)) serial_gatt_register();
