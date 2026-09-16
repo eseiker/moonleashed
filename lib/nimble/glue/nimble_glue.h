@@ -59,6 +59,20 @@ bool nimble_glue_is_advertising(void);
 /* True while a central is connected. */
 bool nimble_glue_is_connected(void);
 
+/* True while the host is scanning as observer/central. */
+bool nimble_glue_is_scanning(void);
+
+/* Central capability probe (TASK-615, Milestone 2 gate). Suspends the companion
+ * (stops advertising and drops the bound peripheral link), then starts an active
+ * scan as observer/central once the last peripheral link is gone. This is the
+ * cheap on-hardware test of whether the ST HCILayer controller can act as a
+ * central at all — the gate for the Flipper-as-central modal time-share case.
+ * Scan reports arrive as log lines; read nimble_glue_scan_count(). Returns false
+ * if the host is not synced or a probe is already running. Call
+ * nimble_glue_central_probe_stop() to cancel the scan and restore the companion. */
+bool nimble_glue_central_probe_start(void);
+void nimble_glue_central_probe_stop(void);
+
 /* True while legacy pairing is in progress (passkey shown, awaiting the phone). */
 bool nimble_glue_is_pairing(void);
 

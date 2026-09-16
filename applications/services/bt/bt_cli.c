@@ -9,6 +9,7 @@
 #include "bt_settings.h"
 #include "bt_service/bt.h"
 #include <profiles/serial_profile.h>
+#include <nimble_glue.h>
 
 static void bt_cli_command_hci_info(PipeSide* pipe, FuriString* args, void* context) {
     UNUSED(pipe);
@@ -167,11 +168,57 @@ static void bt_cli_command_packet_rx(PipeSide* pipe, FuriString* args, void* con
     } while(false);
 }
 
+/* Central capability probe for the resident NimBLE host (TASK-615, Milestone 2).
+ * Suspends the companion and scans as central, so we can see on hardware whether
+ * the ST HCILayer controller can act as a central at all — the gate for the
+ * Flipper-as-central modal time-share case. */
+static void bt_cli_command_nimble_scan(PipeSide* pipe, FuriString* args, void* context) {
+    UNUSED(args);
+    UNUSED(context);
+
+    if(!nimble_glue_is_synced()) {
+        printf("NimBLE host not active (stock BT stack in use).\r\n");
+        return;
+    }
+    if(!nimble_glue_central_probe_start()) {
+        printf("Probe start failed (already probing, or host not synced).\r\n");
+        return;
+    }
+    printf("Central scan probe: companion suspended, scanning as central.\r\n");
+    printf("If reports appear, the controller can scan; if not, it is peripheral-only.\r\n");
+    printf("Press CTRL+C to stop and restore the companion.\r\n");
+
+    uint32_t last = 0;
+    while(!cli_is_pipe_broken_or_is_etx_next_char(pipe)) {
+        furi_delay_ms(250);
+        uint32_t n = nimble_glue_scan_count();
+        if(n != last) {
+            uint8_t a[6];
+            if(nimble_glue_get_last_addr(a)) {
+                printf(
+                    "reports=%lu last=%02X:%02X:%02X:%02X:%02X:%02X\r\n",
+                    n,
+                    a[5],
+                    a[4],
+                    a[3],
+                    a[2],
+                    a[1],
+                    a[0]);
+            }
+            last = n;
+        }
+    }
+
+    nimble_glue_central_probe_stop();
+    printf("Scan stopped. total reports=%lu. Companion restored.\r\n", nimble_glue_scan_count());
+}
+
 static void bt_cli_print_usage(void) {
     printf("Usage:\r\n");
     printf("bt <cmd> <args>\r\n");
     printf("Cmd list:\r\n");
     printf("\thci_info\t - HCI info\r\n");
+    printf("\tnimble_scan\t - NimBLE central scan probe (suspends companion)\r\n");
     if(furi_hal_rtc_is_flag_set(FuriHalRtcFlagDebug) && furi_hal_bt_is_testing_supported()) {
         printf("\ttx_carrier <channel:0-39> <power:0-6>\t - start tx carrier test\r\n");
         printf("\trx_carrier <channel:0-39>\t - start rx carrier test\r\n");
@@ -197,6 +244,10 @@ static void bt_cli(PipeSide* pipe, FuriString* args, void* context) {
         }
         if(furi_string_cmp_str(cmd, "hci_info") == 0) {
             bt_cli_command_hci_info(pipe, args, NULL);
+            break;
+        }
+        if(furi_string_cmp_str(cmd, "nimble_scan") == 0) {
+            bt_cli_command_nimble_scan(pipe, args, NULL);
             break;
         }
         if(furi_hal_rtc_is_flag_set(FuriHalRtcFlagDebug) && furi_hal_bt_is_testing_supported()) {

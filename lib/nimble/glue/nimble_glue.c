@@ -64,6 +64,7 @@ static struct {
     volatile uint32_t passkey;
     volatile uint16_t conn_handle;
     volatile uint8_t conn_count;
+    volatile bool central_probe; /* Milestone 2 gate: scanning as central after suspend */
     volatile uint32_t scan_count;
     uint8_t addr_type;
     uint8_t addr[6];
@@ -83,6 +84,7 @@ static struct ble_hs_stop_listener stop_listener;
 static FuriSemaphore* stop_sem;
 
 static void start_advertise(void);
+static void start_scan(void);
 
 /* Re-arm connectable advertising when a peripheral slot is still free, so the
  * Flipper can hold a second incoming link (companion + a separate CoC central,
@@ -90,6 +92,7 @@ static void start_advertise(void);
  * controller allows advertising while a peripheral connection is up (KNOW-618,
  * supported-states bits 24/25). */
 static void maybe_advertise(void) {
+    if(glue.central_probe) return; /* companion is suspended for a central scan */
     if(glue.advertising) return;
     if(glue.conn_count >= MYNEWT_VAL(BLE_MAX_CONNECTIONS)) return;
     start_advertise();
@@ -101,6 +104,23 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
     case BLE_GAP_EVENT_DISC:
         glue.scan_count++;
         memcpy(glue.last_addr, event->disc.addr.val, 6);
+        FURI_LOG_I(
+            TAG,
+            "Scan #%lu: %02X:%02X:%02X:%02X:%02X:%02X type=%u rssi=%d",
+            glue.scan_count,
+            event->disc.addr.val[5],
+            event->disc.addr.val[4],
+            event->disc.addr.val[3],
+            event->disc.addr.val[2],
+            event->disc.addr.val[1],
+            event->disc.addr.val[0],
+            event->disc.addr.type,
+            event->disc.rssi);
+        break;
+
+    case BLE_GAP_EVENT_DISC_COMPLETE:
+        FURI_LOG_I(TAG, "Scan complete (reason %d), found %lu", event->disc_complete.reason, glue.scan_count);
+        glue.scanning = false;
         break;
 
     case BLE_GAP_EVENT_CONNECT:
@@ -148,7 +168,14 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             if(nimble_mode_has_hid(glue.mode)) hid_gatt_set_conn(0, false);
             serial_store_save(); /* persist any CCCDs written during the connection */
         }
-        maybe_advertise();
+        /* If a central scan probe is waiting for the companion to drop, start the
+         * scan now that the last peripheral link is gone (KNOW-618: the ST
+         * controller cannot scan while a peripheral link is up). */
+        if(glue.central_probe && glue.conn_count == 0) {
+            start_scan();
+        } else {
+            maybe_advertise();
+        }
         break;
     }
 
@@ -280,6 +307,27 @@ static void start_advertise(void) {
     }
     glue.advertising = true;
     FURI_LOG_I(TAG, "Advertising started");
+}
+
+/* Start an active scan as observer/central. Only legal on HCILayer once no
+ * peripheral link is up (KNOW-618). Results arrive as BLE_GAP_EVENT_DISC. */
+static void start_scan(void) {
+    struct ble_gap_disc_params dp;
+    memset(&dp, 0, sizeof(dp));
+    dp.passive = 0; /* active scan: also pull scan responses (names) */
+    dp.filter_duplicates = 0; /* count every advertisement, including repeats */
+    dp.itvl = 0; /* controller default */
+    dp.window = 0;
+    int rc = ble_gap_disc(glue.addr_type, BLE_HS_FOREVER, &dp, gap_event, NULL);
+    if(rc != 0) {
+        /* A non-zero rc here means the controller rejected central scanning —
+         * the gating fact for the Flipper-as-central (modal time-share) case. */
+        FURI_LOG_E(TAG, "ble_gap_disc failed: %d (central scan not available?)", rc);
+        glue.scanning = false;
+        return;
+    }
+    glue.scanning = true;
+    FURI_LOG_I(TAG, "Central scan started");
 }
 
 static void on_reset(int reason) {
@@ -466,6 +514,41 @@ bool nimble_glue_get_last_addr(uint8_t addr[6]) {
 
 bool nimble_glue_is_advertising(void) {
     return glue.advertising;
+}
+
+bool nimble_glue_is_scanning(void) {
+    return glue.scanning;
+}
+
+bool nimble_glue_central_probe_start(void) {
+    if(!glue.synced) return false;
+    if(glue.central_probe) return false; /* already probing */
+    glue.central_probe = true;
+    glue.scan_count = 0;
+    /* Suspend the companion: stop advertising and drop the bound peripheral link.
+     * The scan begins from the DISCONNECT handler once conn_count reaches 0, or
+     * immediately when nothing is connected. */
+    if(glue.advertising) {
+        ble_gap_adv_stop();
+        glue.advertising = false;
+    }
+    if(glue.conn_count > 0 && glue.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(glue.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
+    if(glue.conn_count == 0) {
+        start_scan();
+    }
+    return true;
+}
+
+void nimble_glue_central_probe_stop(void) {
+    if(!glue.central_probe) return;
+    if(glue.scanning) {
+        ble_gap_disc_cancel();
+        glue.scanning = false;
+    }
+    glue.central_probe = false;
+    maybe_advertise(); /* restore the companion */
 }
 
 bool nimble_glue_is_connected(void) {
