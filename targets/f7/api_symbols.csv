@@ -1,5 +1,5 @@
 entry,status,name,type,params
-Version,+,88.19,,
+Version,+,88.20,,
 Header,+,applications/drivers/subghz/cc1101_ext/cc1101_ext_interconnect.h,,
 Header,+,applications/services/applications.h,,
 Header,+,applications/services/bt/bt_service/bt.h,,
@@ -893,8 +893,12 @@ Function,+,ble_security_configure,_Bool,"BleSecurityIoCapability, _Bool, _Bool, 
 Function,+,ble_security_deinit,void,
 Function,+,ble_security_init,void,
 Function,+,ble_security_numeric_comparison_reply,_Bool,"uint16_t, _Bool"
+Function,+,ble_security_oob_clear,void,
+Function,+,ble_security_oob_generate,_Bool,"uint8_t*, uint8_t*"
+Function,+,ble_security_oob_set_peer,_Bool,"const uint8_t*, const uint8_t*"
 Function,+,ble_security_pair,_Bool,uint16_t
 Function,+,ble_security_passkey_reply,_Bool,"uint16_t, uint32_t"
+Function,+,ble_security_secure_connections_supported,_Bool,
 Function,+,ble_security_set_callback,void,"BleSecurityCallback, void*"
 Function,+,ble_svc_battery_start,BleServiceBattery*,_Bool
 Function,+,ble_svc_battery_state_update,void,"uint8_t*, _Bool*"

@@ -38,6 +38,16 @@ static SmGlueCb s_cb;
 static void* s_ctx;
 static SmPending s_pending[SM_GLUE_PENDING_MAX];
 
+/* NimBLE keeps pointers to these for the whole pairing procedure
+ * (ble_sm.c stores pkey->oob_sc_data.local / .remote in the proc), so they must
+ * outlive the inject call. */
+static struct ble_sm_sc_oob_data s_oob_local;
+static struct ble_sm_sc_oob_data s_oob_remote;
+static bool s_oob_local_valid;
+static bool s_oob_remote_valid;
+/* Link whose OOB action fired before the peer's values were armed. */
+static uint16_t s_oob_waiting = BLE_HS_CONN_HANDLE_NONE;
+
 static void pending_set(uint16_t conn_handle, uint8_t action) {
     for(size_t i = 0; i < COUNT_OF(s_pending); i++) {
         if(s_pending[i].action && s_pending[i].conn_handle == conn_handle) {
@@ -141,6 +151,63 @@ bool sm_glue_numeric_reply(uint16_t conn_handle, bool accept) {
     return rc == 0;
 }
 
+/* --- LE Secure Connections OOB ---------------------------------------------- */
+
+bool sm_glue_sc_supported(void) {
+    return MYNEWT_VAL(BLE_SM_SC) != 0;
+}
+
+static bool oob_inject(uint16_t conn_handle) {
+    struct ble_sm_io io = {0};
+    io.action = BLE_SM_IOACT_OOB_SC;
+    io.oob_sc_data.local = s_oob_local_valid ? &s_oob_local : NULL;
+    io.oob_sc_data.remote = s_oob_remote_valid ? &s_oob_remote : NULL;
+    int rc = ble_sm_inject_io(conn_handle, &io);
+    if(rc != 0) FURI_LOG_W(TAG, "OOB inject rc=%d", rc);
+    return rc == 0;
+}
+
+bool sm_glue_oob_generate(uint8_t* out_random, uint8_t* out_confirm) {
+    int rc = ble_sm_sc_oob_generate_data(&s_oob_local);
+    if(rc != 0) {
+        FURI_LOG_E(TAG, "OOB generate rc=%d", rc);
+        s_oob_local_valid = false;
+        return false;
+    }
+    s_oob_local_valid = true;
+    if(out_random) memcpy(out_random, s_oob_local.r, sizeof(s_oob_local.r));
+    if(out_confirm) memcpy(out_confirm, s_oob_local.c, sizeof(s_oob_local.c));
+    FURI_LOG_I(TAG, "OOB local data generated");
+    return true;
+}
+
+bool sm_glue_oob_set_peer(const uint8_t* random, const uint8_t* confirm) {
+    if(!random || !confirm) return false;
+    memcpy(s_oob_remote.r, random, sizeof(s_oob_remote.r));
+    memcpy(s_oob_remote.c, confirm, sizeof(s_oob_remote.c));
+    s_oob_remote_valid = true;
+    /* The pairing request must say we hold the peer's OOB data. */
+    ble_hs_cfg.sm_oob_data_flag = 1;
+    FURI_LOG_I(TAG, "OOB peer data armed");
+
+    if(s_oob_waiting != BLE_HS_CONN_HANDLE_NONE) {
+        uint16_t conn = s_oob_waiting;
+        s_oob_waiting = BLE_HS_CONN_HANDLE_NONE;
+        pending_take(conn);
+        return oob_inject(conn);
+    }
+    return true;
+}
+
+void sm_glue_oob_clear(void) {
+    s_oob_local_valid = false;
+    s_oob_remote_valid = false;
+    s_oob_waiting = BLE_HS_CONN_HANDLE_NONE;
+    memset(&s_oob_local, 0, sizeof(s_oob_local));
+    memset(&s_oob_remote, 0, sizeof(s_oob_remote));
+    ble_hs_cfg.sm_oob_data_flag = 0;
+}
+
 bool sm_glue_on_passkey_action(uint16_t conn_handle, uint8_t action, uint32_t numcmp) {
     if(!s_cb) return false;
 
@@ -159,6 +226,16 @@ bool sm_glue_on_passkey_action(uint16_t conn_handle, uint8_t action, uint32_t nu
     case BLE_SM_IOACT_NUMCMP:
         event.kind = SmGlueEventNumericCompare;
         event.passkey = numcmp;
+        break;
+    case BLE_SM_IOACT_OOB_SC:
+        /* Both halves already present: finish without troubling the consumer. */
+        if(s_oob_local_valid && s_oob_remote_valid) {
+            pending_take(conn_handle);
+            oob_inject(conn_handle);
+            return true;
+        }
+        s_oob_waiting = conn_handle;
+        event.kind = SmGlueEventOobRequest;
         break;
     default:
         event.kind = SmGlueEventOobRequest;

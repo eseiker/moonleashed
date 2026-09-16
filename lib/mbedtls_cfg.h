@@ -64,6 +64,8 @@
 // #define MBEDTLS_CHACHA20_C
 // #define MBEDTLS_CHACHAPOLY_C
 #define MBEDTLS_CIPHER_C
+/* AES-CMAC, used by NimBLE's BLE Secure Connections algorithms (ble_sm_alg.c). */
+#define MBEDTLS_CMAC_C
 #define MBEDTLS_DES_C
 #define MBEDTLS_DHM_C
 
@@ -72,7 +74,10 @@
 #define MBEDTLS_ECDSA_C
 #define MBEDTLS_ECP_C
 
-#define MBEDTLS_GCM_C
+/* GCM is off: gcm.c has never been in the curated source list, so nothing could
+ * link against it. Leaving the define on makes cipher_wrap.c reference it once
+ * the cipher layer is built for Secure Connections (TASK-689). */
+// #define MBEDTLS_GCM_C
 
 #define MBEDTLS_AES_C
 #define MBEDTLS_MD5_C

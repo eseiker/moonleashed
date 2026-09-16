@@ -83,6 +83,29 @@ bool sm_glue_passkey_reply(uint16_t conn_handle, uint32_t passkey);
 /* Answer SmGlueEventNumericCompare. */
 bool sm_glue_numeric_reply(uint16_t conn_handle, bool accept);
 
+/* --- LE Secure Connections OOB (TASK-689) ------------------------------------
+ *
+ * The confirm value derives from this host's SC public key, so only the Flipper
+ * can produce it. Generate ours, hand it to the peer out of band, take the
+ * peer's back, and pairing uses both.
+ *
+ * Generate our OOB random and confirm values. The key pair behind them is made
+ * once per host run, so the values stay valid for the pairing that follows.
+ * Both buffers are 16 bytes. */
+bool sm_glue_oob_generate(uint8_t* out_random, uint8_t* out_confirm);
+
+/* Arm the peer's OOB values, normally before pairing starts. This also tells
+ * the peer we hold its OOB data, which its pairing request must agree with. If
+ * a pairing is already waiting for them, this completes it. Both buffers are
+ * 16 bytes. */
+bool sm_glue_oob_set_peer(const uint8_t* random, const uint8_t* confirm);
+
+/* Forget both sides' OOB values and stop advertising that we hold the peer's. */
+void sm_glue_oob_clear(void);
+
+/* True when Secure Connections is built into this firmware. */
+bool sm_glue_sc_supported(void);
+
 /* --- nimble_glue internal ---------------------------------------------------- */
 /* True when the consumer took the event and the caller must not run its own
  * companion handling. action is NimBLE's BLE_SM_IOACT_*. */

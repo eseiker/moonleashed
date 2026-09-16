@@ -41,6 +41,13 @@ sources = [
     File("mbedtls/library/aes.c"),
     File("mbedtls/library/bignum.c"),
     File("mbedtls/library/bignum_core.c"),
+    # cipher + cmac + ecdh back NimBLE's BLE Secure Connections algorithms:
+    # ble_sm_alg.c calls mbedtls_cipher_cmac and mbedtls_ecdh_compute_shared.
+    File("mbedtls/library/cipher.c"),
+    File("mbedtls/library/cipher_wrap.c"),
+    File("mbedtls/library/cmac.c"),
+    File("mbedtls/library/constant_time.c"),
+    File("mbedtls/library/ecdh.c"),
     File("mbedtls/library/ecdsa.c"),
     File("mbedtls/library/ecp.c"),
     File("mbedtls/library/ecp_curves.c"),

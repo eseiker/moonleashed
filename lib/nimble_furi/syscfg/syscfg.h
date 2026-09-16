@@ -1225,8 +1225,12 @@
 #define MYNEWT_VAL_BLE_SM_OUR_KEY_DIST (3)
 #endif
 
+/* Secure Connections, needed for LE SC OOB pairing (TASK-689). Legacy pairing
+ * stays the default: ble_hs_cfg.sm_sc is 0 unless a caller asks for SC, so the
+ * companion's pairing is unchanged. Building this pulls mbedtls CMAC and ECDH
+ * into the firmware (lib/mbedtls.scons). */
 #ifndef MYNEWT_VAL_BLE_SM_SC
-#define MYNEWT_VAL_BLE_SM_SC (0)
+#define MYNEWT_VAL_BLE_SM_SC (1)
 #endif
 
 #ifndef MYNEWT_VAL_BLE_SM_SC_DEBUG_KEYS

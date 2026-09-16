@@ -349,6 +349,28 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
                 l2_error(app, 0x0008);
         }
         break;
+    case L2F_SEC_OOB_GENERATE: {
+        /* Answer with our OOB values; an empty payload reports a failure. */
+        l2_security_claim(app);
+        uint8_t p[2 * BLE_SECURITY_OOB_LEN];
+        if(ble_security_oob_generate(p, p + BLE_SECURITY_OOB_LEN)) {
+            l2_emit(app, L2F_SEC_OOB_LOCAL, p, sizeof(p));
+        } else {
+            l2_emit(app, L2F_SEC_OOB_LOCAL, NULL, 0);
+            l2_error(app, 0x0008);
+        }
+    } break;
+    case L2F_SEC_OOB_PEER:
+        /* [random:16][confirm:16] */
+        l2_security_claim(app);
+        if(f->len >= 2 * BLE_SECURITY_OOB_LEN) {
+            if(!ble_security_oob_set_peer(f->data, f->data + BLE_SECURITY_OOB_LEN))
+                l2_error(app, 0x0008);
+        }
+        break;
+    case L2F_SEC_OOB_CLEAR:
+        ble_security_oob_clear();
+        break;
     case L2F_GATT_SERVICE: {
         /* [primary:1][uuid_type:1][uuid...] */
         BleGattServerUuid uuid;
