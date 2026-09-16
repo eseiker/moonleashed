@@ -690,9 +690,9 @@ static void bt_nimble_poll_callback(void* context) {
 // (report map, HID info, device info strings) is already served statically by
 // NimBLE and is dropped. Runs on the updating app's thread; the glue only does
 // a shallow copy + event post, the NimBLE host thread sends.
-#define BT_UUID16_HID_REPORT        (0x2A4D)
-#define BT_UUID16_BATTERY_LEVEL     (0x2A19)
-#define BT_HID_REPORT_TYPE_INPUT    (0x01)
+#define BT_UUID16_HID_REPORT     (0x2A4D)
+#define BT_UUID16_BATTERY_LEVEL  (0x2A19)
+#define BT_HID_REPORT_TYPE_INPUT (0x01)
 
 static void bt_nimble_gatt_update_callback(
     uint16_t char_uuid16,
@@ -753,8 +753,7 @@ static bool bt_nimble_bringup(Bt* bt) {
     bt->nimble_profile_started = false;
     bt->nimble_last_status = BtStatusOff;
     bt->nimble_pin_shown = false;
-    bt->nimble_timer =
-        furi_timer_alloc(bt_nimble_poll_callback, FuriTimerTypePeriodic, bt);
+    bt->nimble_timer = furi_timer_alloc(bt_nimble_poll_callback, FuriTimerTypePeriodic, bt);
     furi_timer_start(bt->nimble_timer, furi_ms_to_ticks(400));
 
     FURI_LOG_I(TAG, "NimBLE host started on the HCI Layer radio (mode %d)", mode);

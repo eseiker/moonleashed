@@ -47,13 +47,15 @@ void ble_dispatch_init(void) {
 
     if(!mine) {
         /* Another thread is starting it; wait until it is up. */
-        while(!s_ready) furi_delay_ms(1);
+        while(!s_ready)
+            furi_delay_ms(1);
         return;
     }
 
     s_queue = furi_message_queue_alloc(BLE_DISPATCH_QUEUE_DEPTH, sizeof(BleDispatchMsg));
     s_lock = furi_mutex_alloc(FuriMutexTypeRecursive);
-    s_thread = furi_thread_alloc_ex("BleDispatch", BLE_DISPATCH_STACK_SIZE, ble_dispatch_worker, NULL);
+    s_thread =
+        furi_thread_alloc_ex("BleDispatch", BLE_DISPATCH_STACK_SIZE, ble_dispatch_worker, NULL);
     furi_thread_start(s_thread);
     s_ready = true;
     FURI_LOG_I(TAG, "started");
@@ -63,7 +65,8 @@ bool ble_dispatch_post(BleDispatchFn fn, void* blob) {
     BleDispatchMsg msg = {.fn = fn, .blob = blob};
     if(s_ready && furi_message_queue_put(s_queue, &msg, 0) == FuriStatusOk) return true;
     s_dropped++;
-    FURI_LOG_W(TAG, "event dropped (%s, total %lu)", s_ready ? "queue full" : "not started", s_dropped);
+    FURI_LOG_W(
+        TAG, "event dropped (%s, total %lu)", s_ready ? "queue full" : "not started", s_dropped);
     free(blob);
     return false;
 }

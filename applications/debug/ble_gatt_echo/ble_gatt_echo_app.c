@@ -125,7 +125,8 @@ static FuriHalBleProfileBase* echo_profile_start(FuriHalBleProfileParams params)
     p->base.config = echo_profile_template();
 
     p->event_handler = ble_event_dispatcher_register_svc_handler(echo_event_handler, p);
-    if(!ble_gatt_service_add(UUID_TYPE_128, &echo_svc_uuid, PRIMARY_SERVICE, 1 + 2 + 3, &p->svc_handle)) {
+    if(!ble_gatt_service_add(
+           UUID_TYPE_128, &echo_svc_uuid, PRIMARY_SERVICE, 1 + 2 + 3, &p->svc_handle)) {
         ble_event_dispatcher_unregister_svc_handler(p->event_handler);
         free(p);
         return NULL;
@@ -177,9 +178,15 @@ static void echo_draw(Canvas* canvas, void* context) {
         canvas_draw_str(canvas, 1, 26, "profile start FAILED");
     } else {
         EchoProfile* p = app->profile;
-        snprintf(line, sizeof(line), "RX %lu  notify:%s", p->rx_count, p->subscribed ? "on" : "off");
+        snprintf(
+            line, sizeof(line), "RX %lu  notify:%s", p->rx_count, p->subscribed ? "on" : "off");
         canvas_draw_str(canvas, 1, 26, line);
-        snprintf(line, sizeof(line), "last: %.*s", (int)MIN(p->last_len, (uint16_t)20), (const char*)p->last);
+        snprintf(
+            line,
+            sizeof(line),
+            "last: %.*s",
+            (int)MIN(p->last_len, (uint16_t)20),
+            (const char*)p->last);
         canvas_draw_str(canvas, 1, 40, line);
     }
     canvas_draw_str(canvas, 1, 55, "Back: exit");
@@ -207,8 +214,8 @@ int32_t ble_gatt_echo_app(void* arg) {
 
     InputEvent key;
     for(;;) {
-        if(furi_message_queue_get(app.keys, &key, 200) == FuriStatusOk && key.key == InputKeyBack &&
-           key.type == InputTypeShort)
+        if(furi_message_queue_get(app.keys, &key, 200) == FuriStatusOk &&
+           key.key == InputKeyBack && key.type == InputTypeShort)
             break;
         view_port_update(vp);
     }

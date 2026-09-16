@@ -7,8 +7,8 @@
 extern "C" {
 #endif
 
-#define BLE_L2CAP_COC_MPS_MAX    248
-#define BLE_L2CAP_COC_MTU_DEFAULT 2048
+#define BLE_L2CAP_COC_MPS_MAX         248
+#define BLE_L2CAP_COC_MTU_DEFAULT     2048
 #define BLE_L2CAP_COC_CREDITS_DEFAULT 10
 
 typedef enum {

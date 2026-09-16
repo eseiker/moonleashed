@@ -7,8 +7,8 @@
 #include "h4_frame.h"
 
 #define TAILCAT_HCI_DEFAULT_RUNTIME_SECONDS 180UL
-#define TAILCAT_HCI_MIN_RUNTIME_SECONDS 30UL
-#define TAILCAT_HCI_MAX_RUNTIME_SECONDS 3600UL
+#define TAILCAT_HCI_MIN_RUNTIME_SECONDS     30UL
+#define TAILCAT_HCI_MAX_RUNTIME_SECONDS     3600UL
 
 typedef struct {
     FuriThread* worker;
@@ -84,8 +84,7 @@ static void draw(Canvas* canvas, void* context) {
     canvas_set_font(canvas, FontPrimary);
     canvas_draw_str(canvas, 1, 12, "Tailcat HCI / ABI 2");
     canvas_set_font(canvas, FontSecondary);
-    canvas_draw_str(
-        canvas, 1, 26, app->failed ? "STOPPED: exit and retry" : "HCILayer / CDC #2");
+    canvas_draw_str(canvas, 1, 26, app->failed ? "STOPPED: exit and retry" : "HCILayer / CDC #2");
     snprintf(line, sizeof(line), "Host > %lu   < %lu", app->sent, app->received);
     canvas_draw_str(canvas, 1, 40, line);
     canvas_draw_str(canvas, 1, 55, "Back: reset controller / exit");
@@ -103,8 +102,11 @@ static uint32_t runtime_seconds_from_context(const void* context) {
     unsigned long seconds = strtoul(text, &end, 10);
     if(end == text || *end != '\0' || seconds < TAILCAT_HCI_MIN_RUNTIME_SECONDS ||
        seconds > TAILCAT_HCI_MAX_RUNTIME_SECONDS) {
-        FURI_LOG_W("TailcatHci", "Invalid runtime '%s'; using %lus", text,
-                   TAILCAT_HCI_DEFAULT_RUNTIME_SECONDS);
+        FURI_LOG_W(
+            "TailcatHci",
+            "Invalid runtime '%s'; using %lus",
+            text,
+            TAILCAT_HCI_DEFAULT_RUNTIME_SECONDS);
         return TAILCAT_HCI_DEFAULT_RUNTIME_SECONDS;
     }
     return (uint32_t)seconds;

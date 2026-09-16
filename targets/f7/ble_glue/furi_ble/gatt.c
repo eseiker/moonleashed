@@ -65,7 +65,9 @@ static struct {
 _Static_assert(offsetof(hci_uart_pckt, data) == 1, "hci_uart_pckt layout");
 _Static_assert(offsetof(hci_event_pckt, data) == 2, "hci_event_pckt layout");
 _Static_assert(offsetof(evt_blecore_aci, data) == 2, "evt_blecore_aci layout");
-_Static_assert(offsetof(aci_gatt_attribute_modified_event_rp0, Attr_Data) == 8, "attr modified layout");
+_Static_assert(
+    offsetof(aci_gatt_attribute_modified_event_rp0, Attr_Data) == 8,
+    "attr modified layout");
 #define GATT_ACI_EVT_HDR (5U)
 
 static bool gatt_service_is_nimble_static(uint8_t uuid_type, const Service_UUID_t* uuid) {
@@ -300,7 +302,8 @@ void ble_gatt_characteristic_init(
             const BleGattCharacteristicDescriptorParams* desc = char_descriptor->descriptor_params;
             uint8_t const* desc_data = NULL;
             uint16_t desc_data_len = 0;
-            bool release = desc->data_callback.fn(desc->data_callback.context, &desc_data, &desc_data_len);
+            bool release =
+                desc->data_callback.fn(desc->data_callback.context, &desc_data, &desc_data_len);
             if(desc->uuid_type == UUID_TYPE_16) {
                 dsc_uuid.type = 16;
                 dsc_uuid.u16 = desc->uuid.Char_UUID_16;
@@ -355,7 +358,8 @@ void ble_gatt_characteristic_init(
             const BleGattCharacteristicDescriptorParams* desc = char_descriptor->descriptor_params;
             uint8_t const* desc_data = NULL;
             uint16_t desc_len = 0;
-            bool release_data = desc->data_callback.fn(desc->data_callback.context, &desc_data, &desc_len);
+            bool release_data =
+                desc->data_callback.fn(desc->data_callback.context, &desc_data, &desc_len);
             if(desc->uuid_type == UUID_TYPE_16 &&
                desc->uuid.Char_UUID_16 == REPORT_REFERENCE_DESCRIPTOR_UUID && desc_data &&
                desc_len == 2) {
@@ -488,8 +492,9 @@ bool ble_gatt_characteristic_update(
         /* Hand the value to the resident host instead of CPU2. Mirrors the
          * stock return convention below: false means success. */
         if(s_shim->on_update) {
-            uint16_t uuid16 =
-                (char_descriptor->uuid_type == UUID_TYPE_16) ? char_descriptor->uuid.Char_UUID_16 : 0;
+            uint16_t uuid16 = (char_descriptor->uuid_type == UUID_TYPE_16) ?
+                                  char_descriptor->uuid.Char_UUID_16 :
+                                  0;
             s_shim->on_update(
                 uuid16,
                 ble_gatt_shim_ref_get(char_instance->handle),
