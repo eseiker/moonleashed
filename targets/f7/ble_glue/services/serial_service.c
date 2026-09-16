@@ -238,28 +238,14 @@ bool ble_svc_serial_update_tx(BleServiceSerial* serial_svc, uint8_t* data, uint1
         return false;
     }
 
-    for(uint16_t remained = data_len; remained > 0;) {
-        uint8_t value_len = MIN(BLE_SVC_SERIAL_CHAR_VALUE_LEN_MAX, remained);
-        uint16_t value_offset = data_len - remained;
-        remained -= value_len;
-
-        tBleStatus result = aci_gatt_update_char_value_ext(
-            0,
-            serial_svc->svc_handle,
-            serial_svc->chars[SerialSvcGattCharacteristicTx].handle,
-            remained ? 0x00 : 0x02,
-            data_len,
-            value_offset,
-            value_len,
-            data + value_offset);
-
-        if(result) {
-            FURI_LOG_E(TAG, "Failed updating TX characteristic: %d", result);
-            return false;
-        }
-    }
-
-    return true;
+    UNUSED(serial_svc);
+    UNUSED(data);
+    /* The resident NimBLE host serves the Serial Service itself and runs its own
+     * RPC session (lib/nimble_furi/glue/serial_gatt.c), so nothing reaches here.
+     * CPU2 runs the HCILayer radio, a bare controller with no GATT server, so
+     * the ACI update this used to send had nowhere to go (TASK-696). */
+    FURI_LOG_E(TAG, "serial TX needs a CPU2 GATT server, which this radio has not");
+    return false;
 }
 
 void ble_svc_serial_set_rpc_active(BleServiceSerial* serial_svc, bool active) {

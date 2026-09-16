@@ -2,6 +2,7 @@
 #include "furi_hal_bt_i.h"
 #include <core/check.h>
 #include <gap.h>
+#include <nimble_glue.h>
 #include <furi_hal_bt.h>
 #include <furi_ble/profile_interface.h>
 
@@ -131,7 +132,9 @@ bool furi_hal_bt_enter_ll_only(void) {
             current_profile->config->stop(current_profile);
             current_profile = NULL;
         }
-        hci_reset();
+        /* No hci_reset here: the resident NimBLE host owns the HCI transport,
+         * and this path is dead anyway because it needs a BLE Full stack
+         * (TASK-696). */
         gap_thread_stop();
         ble_app_deinit();
 
@@ -297,8 +300,10 @@ void furi_hal_bt_reinit(void) {
         current_profile = NULL;
     }
 
-    // Magic happens here
-    hci_reset();
+    /* The stock code reset the controller over ST's HCI transport here. The
+     * resident NimBLE host owns that transport, and bt.c never reaches this
+     * path under NimBLE because reinitializing CPU2 would take the controller
+     * away from it (TASK-696). */
 
     FURI_LOG_I(TAG, "Stop BLE related RTOS threads");
     gap_thread_stop();
@@ -386,37 +391,27 @@ void furi_hal_bt_nvm_sram_sem_release(void) {
 }
 
 bool furi_hal_bt_clear_white_list(void) {
-    furi_hal_bt_nvm_sram_sem_acquire();
-    tBleStatus status = aci_gap_clear_security_db();
-    if(status) {
-        FURI_LOG_E(TAG, "Clear while list failed with status %d", status);
-    }
-    furi_hal_bt_nvm_sram_sem_release();
-    return status != BLE_STATUS_SUCCESS;
+    /* Bonds live in NimBLE's store, not ST's CPU2 security database, so this
+     * clears the store the resident host actually uses (TASK-696). */
+    nimble_glue_forget_bonds();
+    return false;
 }
 
 void furi_hal_bt_dump_state(FuriString* buffer) {
     furi_check(buffer);
 
     if(furi_hal_bt_is_alive()) {
-        uint8_t HCI_Version;
-        uint16_t HCI_Revision;
-        uint8_t LMP_PAL_Version;
-        uint16_t Manufacturer_Name;
-        uint16_t LMP_PAL_Subversion;
-
-        tBleStatus ret = hci_read_local_version_information(
-            &HCI_Version, &HCI_Revision, &LMP_PAL_Version, &Manufacturer_Name, &LMP_PAL_Subversion);
-
+        /* Reading the controller's version used to go out over ST's HCI
+         * transport, which the resident NimBLE host now owns; issuing a command
+         * behind its back would desynchronize it (TASK-696). */
+        const BleGlueC2Info* info = ble_glue_get_c2_info();
         furi_string_cat_printf(
             buffer,
-            "Ret: %d, HCI_Version: %d, HCI_Revision: %d, LMP_PAL_Version: %d, Manufacturer_Name: %d, LMP_PAL_Subversion: %d",
-            ret,
-            HCI_Version,
-            HCI_Revision,
-            LMP_PAL_Version,
-            Manufacturer_Name,
-            LMP_PAL_Subversion);
+            "NimBLE host on CPU1, radio %d.%d.%d, stack type %d",
+            info->VersionMajor,
+            info->VersionMinor,
+            info->VersionSub,
+            info->StackType);
     } else {
         furi_string_cat_printf(buffer, "BLE not ready");
     }
@@ -426,65 +421,58 @@ bool furi_hal_bt_is_alive(void) {
     return ble_glue_is_alive();
 }
 
+/* Radio test tools (TASK-696).
+ *
+ * These drove CPU2 directly: the tone and RSSI entry points are ST vendor ACI
+ * commands, which the HCILayer radio does not implement, and the packet test
+ * entry points are standard HCI commands that would have to share the HCI
+ * transport the resident NimBLE host owns. Neither is safe here, so they report
+ * nothing rather than issuing commands.
+ */
+static void furi_hal_bt_no_radio_test(const char* what) {
+    FURI_LOG_E(TAG, "%s is not available on the HCILayer radio", what);
+}
+
 void furi_hal_bt_start_tone_tx(uint8_t channel, uint8_t power) {
-    aci_hal_set_tx_power_level(0, power);
-    aci_hal_tone_start(channel, 0);
+    UNUSED(channel);
+    UNUSED(power);
+    furi_hal_bt_no_radio_test("tone TX");
 }
 
 void furi_hal_bt_stop_tone_tx(void) {
-    aci_hal_tone_stop();
 }
 
 void furi_hal_bt_start_packet_tx(uint8_t channel, uint8_t pattern, uint8_t datarate) {
-    hci_le_enhanced_transmitter_test(channel, 0x25, pattern, datarate);
+    UNUSED(channel);
+    UNUSED(pattern);
+    UNUSED(datarate);
+    furi_hal_bt_no_radio_test("packet TX");
 }
 
 void furi_hal_bt_start_packet_rx(uint8_t channel, uint8_t datarate) {
-    hci_le_enhanced_receiver_test(channel, datarate, 0);
+    UNUSED(channel);
+    UNUSED(datarate);
+    furi_hal_bt_no_radio_test("packet RX");
 }
 
 uint16_t furi_hal_bt_stop_packet_test(void) {
-    uint16_t num_of_packets = 0;
-    hci_le_test_end(&num_of_packets);
-    return num_of_packets;
+    return 0;
 }
 
 void furi_hal_bt_start_rx(uint8_t channel) {
-    aci_hal_rx_start(channel);
+    UNUSED(channel);
+    furi_hal_bt_no_radio_test("RX");
 }
 
 float furi_hal_bt_get_rssi(void) {
-    float val;
-    uint8_t rssi_raw[3];
-
-    if(aci_hal_read_raw_rssi(rssi_raw) != BLE_STATUS_SUCCESS) {
-        return 0.0f;
-    }
-
-    // Some ST magic with rssi
-    uint8_t agc = rssi_raw[2] & 0xFF;
-    int rssi = (((int)rssi_raw[1] << 8) & 0xFF00) + (rssi_raw[0] & 0xFF);
-    if(rssi == 0 || agc > 11) {
-        val = -127.0;
-    } else {
-        val = agc * 6.0f - 127.0f;
-        while(rssi > 30) {
-            val += 6.0;
-            rssi >>= 1;
-        }
-        val += (float)((417 * rssi + 18080) >> 10);
-    }
-    return val;
+    return 0.0f;
 }
 
 uint32_t furi_hal_bt_get_transmitted_packets(void) {
-    uint32_t packets = 0;
-    aci_hal_le_tx_test_packet_number(&packets);
-    return packets;
+    return 0;
 }
 
 void furi_hal_bt_stop_rx(void) {
-    aci_hal_rx_stop();
 }
 
 bool furi_hal_bt_ensure_c2_mode(BleGlueC2Mode mode) {

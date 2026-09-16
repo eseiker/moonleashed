@@ -20,6 +20,15 @@
 #define ble_gatt_strict_crash(message)
 #endif
 
+/* The shim is always installed under the resident NimBLE host, so the branches
+ * that used to talk to a CPU2 GATT server are unreachable. This fork ships the
+ * HCILayer radio, a bare controller with no host, so there is nothing to talk
+ * to; the ACI paths were removed with their command builders (TASK-696). */
+static void ble_gatt_no_host(const char* what) {
+    FURI_LOG_E(TAG, "no GATT server on CPU2 for %s: the shim is not installed", what);
+    ble_gatt_strict_crash("GATT shim not installed");
+}
+
 /* ---- Host shim (see gatt_host_shim.h) ------------------------------------
  * While s_shim is set, every primitive below skips the CPU2 ACI call. Handles
  * are synthetic and only need to be unique per instance; the Report Reference
@@ -376,52 +385,11 @@ void ble_gatt_characteristic_init(
         return;
     }
 
-    tBleStatus status = aci_gatt_add_char(
-        svc_handle,
-        char_descriptor->uuid_type,
-        &char_descriptor->uuid,
-        char_data_size,
-        char_descriptor->char_properties,
-        char_descriptor->security_permissions,
-        char_descriptor->gatt_evt_mask,
-        GATT_MIN_READ_KEY_SIZE,
-        char_descriptor->is_variable,
-        &char_instance->handle);
-    if(status) {
-        FURI_LOG_E(TAG, "Failed to add %s char: %d", char_descriptor->name, status);
-        ble_gatt_strict_crash("Failed to add characteristic");
-    }
-
+    /* No shim means no host: CPU2 runs the HCILayer radio, which is a bare
+     * controller with no GATT server to add a characteristic to. */
+    ble_gatt_no_host(char_descriptor->name);
+    char_instance->handle = 0;
     char_instance->descriptor_handle = 0;
-    if((status == 0) && char_descriptor->descriptor_params) {
-        uint8_t const* char_data = NULL;
-        const BleGattCharacteristicDescriptorParams* char_data_descriptor =
-            char_descriptor->descriptor_params;
-        bool release_data = char_data_descriptor->data_callback.fn(
-            char_data_descriptor->data_callback.context, &char_data, &char_data_size);
-
-        status = aci_gatt_add_char_desc(
-            svc_handle,
-            char_instance->handle,
-            char_data_descriptor->uuid_type,
-            &char_data_descriptor->uuid,
-            char_data_descriptor->max_length,
-            char_data_size,
-            char_data,
-            char_data_descriptor->security_permissions,
-            char_data_descriptor->access_permissions,
-            char_data_descriptor->gatt_evt_mask,
-            GATT_MIN_READ_KEY_SIZE,
-            char_data_descriptor->is_variable,
-            &char_instance->descriptor_handle);
-        if(status) {
-            FURI_LOG_E(TAG, "Failed to add %s char descriptor: %d", char_descriptor->name, status);
-            ble_gatt_strict_crash("Failed to add characteristic descriptor");
-        }
-        if(release_data) {
-            free((void*)char_data);
-        }
-    }
 }
 
 void ble_gatt_characteristic_delete(
@@ -443,12 +411,8 @@ void ble_gatt_characteristic_delete(
         return;
     }
 
-    tBleStatus status = aci_gatt_del_char(svc_handle, char_instance->handle);
-    if(status) {
-        FURI_LOG_E(
-            TAG, "Failed to delete %s char: %d", char_instance->characteristic->name, status);
-        ble_gatt_strict_crash("Failed to delete characteristic");
-    }
+    UNUSED(svc_handle);
+    ble_gatt_no_host(char_instance->characteristic->name);
     free((void*)char_instance->characteristic);
 }
 
@@ -508,28 +472,12 @@ bool ble_gatt_characteristic_update(
         return false;
     }
 
-    tBleStatus result;
-    size_t retries_left = 1000;
-    do {
-        retries_left--;
-        result = aci_gatt_update_char_value(
-            svc_handle, char_instance->handle, 0, char_data_size, char_data);
-        if(result == BLE_STATUS_INSUFFICIENT_RESOURCES) {
-            FURI_LOG_W(TAG, "Insufficient resources for %s characteristic", char_descriptor->name);
-            furi_delay_ms(1);
-        }
-    } while(result == BLE_STATUS_INSUFFICIENT_RESOURCES && retries_left);
-
+    UNUSED(svc_handle);
     if(release_data) {
         free((void*)char_data);
     }
-
-    if(result != BLE_STATUS_SUCCESS) {
-        FURI_LOG_E(TAG, "Failed updating %s characteristic: %d", char_descriptor->name, result);
-        ble_gatt_strict_crash("Failed to update characteristic");
-    }
-
-    return result != BLE_STATUS_SUCCESS;
+    ble_gatt_no_host(char_descriptor->name);
+    return false;
 }
 
 bool ble_gatt_service_add(
@@ -575,14 +523,10 @@ bool ble_gatt_service_add(
         return true;
     }
 
-    tBleStatus result = aci_gatt_add_service(
-        Service_UUID_Type, Service_UUID, Service_Type, Max_Attribute_Records, Service_Handle);
-    if(result) {
-        FURI_LOG_E(TAG, "Failed to add service: %x", result);
-        ble_gatt_strict_crash("Failed to add service");
-    }
-
-    return result == BLE_STATUS_SUCCESS;
+    UNUSED(Max_Attribute_Records);
+    *Service_Handle = 0;
+    ble_gatt_no_host("service");
+    return false;
 }
 
 bool ble_gatt_service_delete(uint16_t svc_handle) {
@@ -604,11 +548,7 @@ bool ble_gatt_service_delete(uint16_t svc_handle) {
         return true;
     }
 
-    tBleStatus result = aci_gatt_del_service(svc_handle);
-    if(result) {
-        FURI_LOG_E(TAG, "Failed to delete service: %x", result);
-        ble_gatt_strict_crash("Failed to delete service");
-    }
-
-    return result == BLE_STATUS_SUCCESS;
+    UNUSED(svc_handle);
+    ble_gatt_no_host("service");
+    return false;
 }

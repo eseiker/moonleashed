@@ -71,25 +71,12 @@ bool gap_extra_beacon_start(void) {
         return false;
     }
 
-    FURI_LOG_I(TAG, "Starting");
-    furi_mutex_acquire(extra_beacon.state_mutex, FuriWaitForever);
-    const GapExtraBeaconConfig* config = &extra_beacon.last_config;
-    tBleStatus status = aci_gap_additional_beacon_start(
-        GAP_MS_TO_SCAN_INTERVAL(config->min_adv_interval_ms),
-        GAP_MS_TO_SCAN_INTERVAL(config->max_adv_interval_ms),
-        (uint8_t)config->adv_channel_map,
-        config->address_type,
-        config->address,
-        (uint8_t)config->adv_power_level);
-    if(status) {
-        FURI_LOG_E(TAG, "Failed to start: 0x%x", status);
-        return false;
-    }
-    extra_beacon.extra_beacon_state = GapExtraBeaconStateStarted;
-    gap_emit_ble_beacon_status_event(true);
-    furi_mutex_release(extra_beacon.state_mutex);
-
-    return true;
+    /* The additional-beacon feature belongs to ST's CPU2 host. This fork ships
+     * the HCILayer radio, a bare controller that does not implement it, so the
+     * request is refused instead of sending an ACI command nothing answers
+     * (TASK-696). */
+    FURI_LOG_E(TAG, "extra beacon needs the ST CPU2 host, which this radio has not");
+    return false;
 }
 
 bool gap_extra_beacon_stop(void) {
@@ -99,18 +86,8 @@ bool gap_extra_beacon_stop(void) {
         return false;
     }
 
-    FURI_LOG_I(TAG, "Stopping");
-    furi_mutex_acquire(extra_beacon.state_mutex, FuriWaitForever);
-    tBleStatus status = aci_gap_additional_beacon_stop();
-    if(status) {
-        FURI_LOG_E(TAG, "Failed to stop: 0x%x", status);
-        return false;
-    }
-    extra_beacon.extra_beacon_state = GapExtraBeaconStateStopped;
-    gap_emit_ble_beacon_status_event(false);
-    furi_mutex_release(extra_beacon.state_mutex);
-
-    return true;
+    /* Never started, so there is nothing to stop. See gap_extra_beacon_start. */
+    return false;
 }
 
 bool gap_extra_beacon_set_data(const uint8_t* data, uint8_t length) {
@@ -124,14 +101,10 @@ bool gap_extra_beacon_set_data(const uint8_t* data, uint8_t length) {
     }
     extra_beacon.extra_beacon_data_len = length;
 
-    tBleStatus status = aci_gap_additional_beacon_set_data(length, data);
-    if(status) {
-        FURI_LOG_E(TAG, "Failed updating adv data: %d", status);
-        return false;
-    }
+    /* The data is kept so a caller can read it back, but there is no beacon to
+     * push it to. See gap_extra_beacon_start. */
     furi_mutex_release(extra_beacon.state_mutex);
-
-    return true;
+    return false;
 }
 
 uint8_t gap_extra_beacon_get_data(uint8_t* data) {
