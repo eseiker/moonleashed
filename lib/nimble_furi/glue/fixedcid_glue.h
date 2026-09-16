@@ -34,16 +34,29 @@ typedef void (*FixedCidRxCb)(
     uint16_t len,
     void* ctx);
 
+/* Runs on the NimBLE host thread, without the ble_hs lock. up is true when a
+ * link on which the registered CIDs are available came up, false when it went
+ * down. The same link can be reported up more than once. */
+typedef void (*FixedCidLinkCb)(uint16_t conn_handle, bool up, void* ctx);
+
 /* Set the single receive dispatcher. */
 void fixedcid_init(FixedCidRxCb dispatch, void* ctx);
+
+/* Set the single link dispatcher (NULL to clear). Links are reported from a
+ * GAP event listener, so peripheral and central links both appear, and
+ * fixedcid_register reports every link that already exists. */
+void fixedcid_set_link_cb(FixedCidLinkCb dispatch, void* ctx);
 void fixedcid_deinit(void);
 
 /* Register a fixed CID (e.g. 0x003A) with a channel MTU. The channel is created
- * on every current connection and on each later one. Returns false on a bad CID
- * (0, or a standard 4/5/6) or when the table is full. */
+ * on every current connection and on each later one. mtu 0, or an mtu above the
+ * receive buffer (2044), uses 2044: NimBLE then rejects a larger PDU instead of
+ * the relay truncating it. Returns false on a bad CID (0, or a standard 4/5/6)
+ * or when the table is full. */
 bool fixedcid_register(uint16_t cid, uint16_t mtu);
 
-/* Stop relaying a CID. Existing channels stay until their link drops. */
+/* Stop relaying a CID. Existing channels stay until their link drops, but
+ * their PDUs are no longer delivered. */
 bool fixedcid_unregister(uint16_t cid);
 
 /* Transmit one raw PDU on a registered fixed CID of a connection. */

@@ -26,6 +26,11 @@ typedef void (*BleL2capFixedCallback)(
     uint16_t data_len,
     void* context);
 
+/** Link callback. connected is true when a link on which the registered CIDs
+ *  are available came up, false when it went down. The same link can be
+ *  reported up more than once, so treat the reports as idempotent. */
+typedef void (*BleL2capFixedLinkCallback)(uint16_t connection_handle, bool connected, void* context);
+
 /** Initialize the fixed-CID relay (idempotent). */
 void ble_l2cap_fixed_init(void);
 
@@ -35,7 +40,14 @@ void ble_l2cap_fixed_deinit(void);
 /** Set the single receive callback (NULL to clear). */
 void ble_l2cap_fixed_set_callback(BleL2capFixedCallback callback, void* context);
 
-/** Relay a fixed CID on every connection (current and future). mtu 0 = default.
+/** Set the single link callback (NULL to clear). Delivered on the BLE dispatch
+ *  thread for every peripheral and central link. ble_l2cap_fixed_register also
+ *  reports each link that already exists, so a caller learns the connection
+ *  handle to send on before the peer has sent anything. */
+void ble_l2cap_fixed_set_link_callback(BleL2capFixedLinkCallback callback, void* context);
+
+/** Relay a fixed CID on every connection (current and future). mtu 0, or an mtu
+ *  above 2044, uses 2044; NimBLE rejects a PDU above the channel MTU.
  *  Rejects 0 and the standard CIDs 4 (ATT), 5 (SIG), 6 (SM). */
 bool ble_l2cap_fixed_register(uint16_t cid, uint16_t mtu);
 

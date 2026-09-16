@@ -17,6 +17,8 @@
 
 static BleL2capFixedCallback s_callback;
 static void* s_context;
+static BleL2capFixedLinkCallback s_link_callback;
+static void* s_link_context;
 static bool s_started;
 
 typedef struct {
@@ -50,10 +52,33 @@ static void fixed_dispatch(
     ble_dispatch_post(fixed_deliver, b);
 }
 
+typedef struct {
+    uint16_t conn_handle;
+    bool connected;
+} FixedLinkBlob;
+
+/* Dispatch thread. */
+static void fixed_link_deliver(void* blob) {
+    FixedLinkBlob* b = blob;
+    ble_dispatch_lock();
+    if(s_link_callback) s_link_callback(b->conn_handle, b->connected, s_link_context);
+    ble_dispatch_unlock();
+}
+
+/* NimBLE host thread (GAP listener, or the caller of register). */
+static void fixed_link_dispatch(uint16_t conn_handle, bool up, void* ctx) {
+    UNUSED(ctx);
+    FixedLinkBlob* b = malloc(sizeof(FixedLinkBlob));
+    b->conn_handle = conn_handle;
+    b->connected = up;
+    ble_dispatch_post(fixed_link_deliver, b);
+}
+
 void ble_l2cap_fixed_init(void) {
     if(s_started) return;
     ble_dispatch_init();
     fixedcid_init(fixed_dispatch, NULL);
+    fixedcid_set_link_cb(fixed_link_dispatch, NULL);
     s_started = true;
     FURI_LOG_I(TAG, "fixed-CID relay initialized");
 }
@@ -63,6 +88,8 @@ void ble_l2cap_fixed_deinit(void) {
     ble_dispatch_lock();
     s_callback = NULL;
     s_context = NULL;
+    s_link_callback = NULL;
+    s_link_context = NULL;
     ble_dispatch_unlock();
     s_started = false;
 }
@@ -71,6 +98,13 @@ void ble_l2cap_fixed_set_callback(BleL2capFixedCallback callback, void* context)
     ble_dispatch_lock();
     s_callback = callback;
     s_context = context;
+    ble_dispatch_unlock();
+}
+
+void ble_l2cap_fixed_set_link_callback(BleL2capFixedLinkCallback callback, void* context) {
+    ble_dispatch_lock();
+    s_link_callback = callback;
+    s_link_context = context;
     ble_dispatch_unlock();
 }
 

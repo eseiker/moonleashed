@@ -62,6 +62,11 @@ _Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must
 #define L2F_DISCONNECTED 0x83 /* [channel:1]          */
 #define L2F_ERROR        0x84 /* [code:2]             */
 #define L2F_FIXED_DATA   0x90 /* [conn:2][cid:2][pdu...] inbound fixed-CID PDU */
+/* FIXED_LINK: a BLE link came up (up=1) or went down (up=0). Sent for every
+ * link while the bridge runs, and again for each existing link after a
+ * FIXED_REGISTER, so the host learns the conn to FIXED_SEND on before the peer
+ * speaks (Magnet's VersionInfo goes first). An up report can repeat. */
+#define L2F_FIXED_LINK   0x91 /* [conn:2][up:1] */
 /* SEC_EVENT payload: [kind:1][conn:2][status:2][passkey:4][flags:1][key_size:1].
  * kind is 0 passkey display, 1 passkey request, 2 numeric comparison,
  * 3 OOB request, 4 encryption changed, 5 repeat pairing.

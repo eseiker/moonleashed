@@ -24,7 +24,9 @@
 #define TAG "TailcatL2cap"
 
 #define L2_DEFAULT_RUNTIME_SECONDS 300UL
-#define L2_TX_STREAM_SIZE          2048U
+/* Room for two largest frames ([type:1][len:2] + L2F_PAYLOAD_MAX), since l2_emit
+ * queues a frame whole or not at all. */
+#define L2_TX_STREAM_SIZE          (2U * (3U + L2F_PAYLOAD_MAX))
 /* Characteristics the host may define through L2F_GATT_CHAR. */
 #define L2_GATT_MAX_CHRS           32U
 
@@ -33,6 +35,7 @@ typedef struct {
     FuriSemaphore* usb_tx;
     FuriMessageQueue* keys;
     FuriStreamBuffer* tx; /* FAP -> host bytes, framed */
+    FuriMutex* tx_lock; /* l2_emit runs on the dispatch and USB worker threads */
     volatile bool stop;
     volatile bool failed;
     volatile bool connected;
@@ -51,11 +54,21 @@ typedef struct {
     bool sec_claimed;
 } L2App;
 
-/* Queue one framed message for the USB worker to send. */
+/* Queue one framed message for the USB worker to send. The BLE dispatch thread
+ * and the USB worker both emit, and a stream buffer allows one writer, so the
+ * header and payload go in under a lock. A frame that does not fit is dropped
+ * whole: a header without its payload would desynchronize the host. */
 static void l2_emit(L2App* app, uint8_t type, const uint8_t* payload, uint16_t len) {
     uint8_t hdr[3] = {type, (uint8_t)(len & 0xFF), (uint8_t)(len >> 8)};
-    furi_stream_buffer_send(app->tx, hdr, sizeof(hdr), 0);
-    if(len && payload) furi_stream_buffer_send(app->tx, payload, len, 0);
+    if(!payload) len = 0;
+    furi_mutex_acquire(app->tx_lock, FuriWaitForever);
+    if(furi_stream_buffer_spaces_available(app->tx) >= sizeof(hdr) + len) {
+        furi_stream_buffer_send(app->tx, hdr, sizeof(hdr), 0);
+        if(len) furi_stream_buffer_send(app->tx, payload, len, 0);
+    } else {
+        FURI_LOG_W(TAG, "tx full, frame 0x%02X (%u B) dropped", type, len);
+    }
+    furi_mutex_release(app->tx_lock);
 }
 
 /* CoC events arrive on the NimBLE host thread; frame them into the tx stream. */
@@ -103,7 +116,7 @@ static void on_coc(BleL2capCocEvent* ev, void* context) {
     }
 }
 
-/* Inbound fixed-CID PDU (host thread). Frame it as [conn:2][cid:2][pdu...]. */
+/* Inbound fixed-CID PDU (dispatch thread). Frame it as [conn:2][cid:2][pdu...]. */
 static void
     on_fixed(uint16_t conn, uint16_t cid, const uint8_t* data, uint16_t len, void* context) {
     L2App* app = context;
@@ -116,6 +129,13 @@ static void
     memcpy(buf + 4, data, len);
     app->rx_sdus++;
     l2_emit(app, L2F_FIXED_DATA, buf, len + 4);
+}
+
+/* A link came up or went down (dispatch thread). Frame it as [conn:2][up:1]. */
+static void on_fixed_link(uint16_t conn, bool connected, void* context) {
+    L2App* app = context;
+    uint8_t p[3] = {(uint8_t)conn, (uint8_t)(conn >> 8), connected ? 1 : 0};
+    l2_emit(app, L2F_FIXED_LINK, p, sizeof(p));
 }
 
 /* Pairing events (dispatch thread): frame them for the host, which answers. */
@@ -561,6 +581,7 @@ int32_t tailcat_l2cap_app(void* context) {
     app->usb_tx = furi_semaphore_alloc(1, 1);
     app->keys = furi_message_queue_alloc(8, sizeof(InputEvent));
     app->tx = furi_stream_buffer_alloc(L2_TX_STREAM_SIZE, 1);
+    app->tx_lock = furi_mutex_alloc(FuriMutexTypeNormal);
     app->worker = furi_thread_alloc_ex("L2capUsb", 2048, l2_worker, app);
 
     /* Use the resident host's CoC API — no raw HCI, no controller acquire. */
@@ -568,6 +589,7 @@ int32_t tailcat_l2cap_app(void* context) {
     ble_l2cap_coc_set_callback(0, on_coc, app);
     ble_l2cap_fixed_init();
     ble_l2cap_fixed_set_callback(on_fixed, app);
+    ble_l2cap_fixed_set_link_callback(on_fixed_link, app);
     /* GATT fixtures the host defines (TASK-666). Registering the consumer adds
      * no services, so the companion's GATT table is untouched until it does. */
     ble_gatt_server_init();
@@ -625,6 +647,7 @@ int32_t tailcat_l2cap_app(void* context) {
     }
     ble_gatt_server_set_callback(NULL, NULL);
     ble_gatt_server_deinit(); /* removes our services and rebuilds the table */
+    ble_l2cap_fixed_set_link_callback(NULL, NULL);
     ble_l2cap_fixed_set_callback(NULL, NULL);
     ble_l2cap_fixed_deinit();
     ble_l2cap_coc_set_callback(0, NULL, NULL);
@@ -636,6 +659,7 @@ int32_t tailcat_l2cap_app(void* context) {
     furi_record_close(RECORD_CLI_VCP);
     furi_thread_free(app->worker);
     furi_stream_buffer_free(app->tx);
+    furi_mutex_free(app->tx_lock);
     furi_message_queue_free(app->keys);
     furi_semaphore_free(app->usb_tx);
     free(app);

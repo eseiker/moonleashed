@@ -30,10 +30,17 @@
 #define TAG "FixedCid"
 
 #define FIXEDCID_MAX   4
-#define FIXEDCID_RXBUF 600
+/* Largest PDU a fixed channel accepts. Magnet carries IKE messages, so leave
+ * room well past the ATT-sized 600; 2044 is also the largest PDU a Tailcat
+ * FIXED_DATA frame holds ([conn:2][cid:2] inside a 2048-byte payload). */
+#define FIXEDCID_RXBUF 2044
 
 static FixedCidRxCb s_cb;
 static void* s_ctx;
+static FixedCidLinkCb s_link_cb;
+static void* s_link_ctx;
+static struct ble_gap_event_listener s_gap_listener;
+static bool s_gap_listening;
 static struct {
     uint16_t cid;
     uint16_t mtu;
@@ -41,13 +48,57 @@ static struct {
 } s_reg[FIXEDCID_MAX];
 static uint8_t s_rxbuf[FIXEDCID_RXBUF];
 
+/* Caller holds ble_hs lock. */
+static bool fixedcid_is_registered(uint16_t cid) {
+    for(int i = 0; i < FIXEDCID_MAX; i++) {
+        if(s_reg[i].used && s_reg[i].cid == cid) return true;
+    }
+    return false;
+}
+
 /* Host thread: copy the B-frame flat and hand it up. ble_l2cap_rx frees the
- * mbuf after we return, so we do not touch *om. */
+ * mbuf after we return, so we do not touch *om. The channel MTU is at most
+ * FIXEDCID_RXBUF and ble_l2cap_rx rejects anything above it, so the copy is
+ * never short. A channel whose CID was unregistered stays installed until its
+ * link drops, so check the table before delivering. */
 static int fixedcid_rx(struct ble_l2cap_chan* chan, struct os_mbuf** om) {
     uint16_t len = OS_MBUF_PKTLEN(*om);
-    if(len > sizeof(s_rxbuf)) len = sizeof(s_rxbuf);
-    if(len && os_mbuf_copydata(*om, 0, len, s_rxbuf) == 0 && s_cb) {
-        s_cb(chan->conn_handle, chan->scid, s_rxbuf, len, s_ctx);
+    if(len > sizeof(s_rxbuf)) return 0;
+    ble_hs_lock();
+    bool deliver = fixedcid_is_registered(chan->scid);
+    FixedCidRxCb cb = s_cb;
+    void* ctx = s_ctx;
+    ble_hs_unlock();
+    if(deliver && cb && os_mbuf_copydata(*om, 0, len, s_rxbuf) == 0) {
+        cb(chan->conn_handle, chan->scid, s_rxbuf, len, ctx);
+    }
+    return 0;
+}
+
+static void fixedcid_report_link(uint16_t conn_handle, bool up) {
+    ble_hs_lock();
+    FixedCidLinkCb cb = s_link_cb;
+    void* ctx = s_link_ctx;
+    ble_hs_unlock();
+    if(cb) cb(conn_handle, up, ctx);
+}
+
+/* Host thread, ble_hs lock not held. NimBLE calls listeners for every link,
+ * peripheral or central, before the link's own GAP callback. */
+static int fixedcid_gap_listener(struct ble_gap_event* event, void* arg) {
+    UNUSED(arg);
+    switch(event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if(event->connect.status == 0) {
+            fixedcid_on_connect(event->connect.conn_handle);
+            fixedcid_report_link(event->connect.conn_handle, true);
+        }
+        break;
+    case BLE_GAP_EVENT_DISCONNECT:
+        fixedcid_report_link(event->disconnect.conn.conn_handle, false);
+        break;
+    default:
+        break;
     }
     return 0;
 }
@@ -76,12 +127,28 @@ void fixedcid_init(FixedCidRxCb dispatch, void* ctx) {
     s_cb = dispatch;
     s_ctx = ctx;
     ble_hs_unlock();
+    /* The listener stays registered for the life of the host: NimBLE keeps the
+     * struct in a list, and a second register returns BLE_HS_EALREADY. */
+    if(!s_gap_listening) {
+        s_gap_listening =
+            ble_gap_event_listener_register(&s_gap_listener, fixedcid_gap_listener, NULL) == 0;
+        if(!s_gap_listening) FURI_LOG_E(TAG, "GAP listener register failed");
+    }
+}
+
+void fixedcid_set_link_cb(FixedCidLinkCb dispatch, void* ctx) {
+    ble_hs_lock();
+    s_link_cb = dispatch;
+    s_link_ctx = ctx;
+    ble_hs_unlock();
 }
 
 void fixedcid_deinit(void) {
     ble_hs_lock();
     s_cb = NULL;
     s_ctx = NULL;
+    s_link_cb = NULL;
+    s_link_ctx = NULL;
     memset(s_reg, 0, sizeof(s_reg));
     ble_hs_unlock();
 }
@@ -91,7 +158,7 @@ bool fixedcid_register(uint16_t cid, uint16_t mtu) {
        cid == BLE_L2CAP_CID_SM) {
         return false;
     }
-    if(mtu == 0) mtu = FIXEDCID_RXBUF;
+    if(mtu == 0 || mtu > FIXEDCID_RXBUF) mtu = FIXEDCID_RXBUF;
 
     ble_hs_lock();
     int slot = -1;
@@ -111,14 +178,21 @@ bool fixedcid_register(uint16_t cid, uint16_t mtu) {
     s_reg[slot].mtu = mtu;
     s_reg[slot].used = true;
 
-    /* Install on every current connection. */
+    /* Install on every current connection, and remember which links carry the
+     * CID so they can be reported once the lock is released. */
+    uint16_t links[MYNEWT_VAL(BLE_MAX_CONNECTIONS)];
+    size_t link_count = 0;
     for(int i = 0;; i++) {
         struct ble_hs_conn* conn = ble_hs_conn_find_by_idx(i);
         if(!conn) break;
-        fixedcid_install(conn, cid, mtu);
+        if(fixedcid_install(conn, cid, mtu) && link_count < COUNT_OF(links)) {
+            links[link_count++] = conn->bhc_handle;
+        }
     }
     ble_hs_unlock();
     FURI_LOG_I(TAG, "registered fixed CID 0x%04X mtu=%u", cid, mtu);
+    for(size_t i = 0; i < link_count; i++)
+        fixedcid_report_link(links[i], true);
     return true;
 }
 
