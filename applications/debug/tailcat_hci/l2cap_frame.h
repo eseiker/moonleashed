@@ -8,8 +8,18 @@
  * carries L2CAP CoC control + SDUs. Frame layout: [type:1][len:2 LE][payload:len].
  */
 
-/* Large enough for a full DCT SDU (MTU 1550) plus the channel byte. */
+/* Frame payload bound. Kept a round 2048; a SEND/DATA payload is
+ * [channel:1][sdu...], so the largest SDU that fits one frame is 2047. */
 #define L2F_PAYLOAD_MAX 2048U
+
+/* CoC MTU the bridge negotiates for both LISTEN and CONNECT. It is tied to the
+ * frame bound (L2F_PAYLOAD_MAX - 1) instead of BLE_L2CAP_COC_MTU_DEFAULT (2048)
+ * so a full-MTU SDU plus the channel byte always fits one DATA frame. NimBLE
+ * rejects any received SDU above the MTU it advertised, so an SDU can never be
+ * truncated on its way to the host. DCT negotiates 1550 and is unaffected. */
+#define L2F_COC_MTU (L2F_PAYLOAD_MAX - 1U)
+
+_Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must fit a frame");
 
 /* Host -> FAP */
 #define L2F_LISTEN     0x01 /* [psm:2]                     start a CoC server   */

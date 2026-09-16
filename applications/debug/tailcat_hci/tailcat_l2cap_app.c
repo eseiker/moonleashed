@@ -60,9 +60,15 @@ static void on_coc(BleL2capCocEvent* ev, void* context) {
         l2_emit(app, L2F_CONNECTED, p, sizeof(p));
     } break;
     case BleL2capCocEventDataReceived: {
-        static uint8_t buf[1 + L2F_PAYLOAD_MAX];
+        static uint8_t buf[L2F_PAYLOAD_MAX];
         uint16_t n = ev->data.data_len;
-        if(n > L2F_PAYLOAD_MAX - 1) n = L2F_PAYLOAD_MAX - 1;
+        /* The CoC was opened with MTU L2F_COC_MTU and NimBLE rejects larger
+         * SDUs, so n always fits. Guard memory anyway, but never forward a
+         * shortened SDU: drop it rather than truncate. */
+        if(n > L2F_COC_MTU) {
+            FURI_LOG_E(TAG, "SDU %u above MTU %u on ch %u dropped", n, L2F_COC_MTU, ev->channel_index);
+            break;
+        }
         buf[0] = ev->channel_index;
         memcpy(buf + 1, ev->data.data, n);
         app->rx_sdus++;
@@ -87,7 +93,7 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
     case L2F_LISTEN:
         if(f->len >= 2) {
             uint16_t psm = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
-            ble_l2cap_coc_listen(psm, BLE_L2CAP_COC_MTU_DEFAULT);
+            ble_l2cap_coc_listen(psm, L2F_COC_MTU);
         }
         break;
     case L2F_SEND:
@@ -168,7 +174,7 @@ static void l2_poll_central(L2App* app) {
         if(!ble_l2cap_coc_connect(
                ev.conn_handle,
                app->central_psm,
-               BLE_L2CAP_COC_MTU_DEFAULT,
+               L2F_COC_MTU,
                BLE_L2CAP_COC_MPS_MAX,
                BLE_L2CAP_COC_CREDITS_DEFAULT)) {
             uint8_t code[2] = {0x03, 0x00}; /* CoC client open failed */
