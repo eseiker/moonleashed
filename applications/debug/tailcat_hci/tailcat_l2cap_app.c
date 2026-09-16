@@ -15,6 +15,8 @@
 
 #include <furi_ble/l2cap_coc.h>
 #include <furi_ble/l2cap_fixed.h>
+#include <furi_ble/security.h>
+#include <furi_ble/gatt_server.h>
 #include <furi_ble/adv.h>
 #include <furi_ble/furi_ble_session.h>
 #include "l2cap_frame.h"
@@ -23,6 +25,8 @@
 
 #define L2_DEFAULT_RUNTIME_SECONDS 300UL
 #define L2_TX_STREAM_SIZE          2048U
+/* Characteristics the host may define through L2F_GATT_CHAR. */
+#define L2_GATT_MAX_CHRS           32U
 
 typedef struct {
     FuriThread* worker;
@@ -38,6 +42,13 @@ typedef struct {
     FuriBleSession* central;
     uint16_t central_psm;
     volatile bool central_coc_opened; /* a CoC opened on the central link */
+    /* Characteristics defined over L2F_GATT_CHAR, so a commit can report every
+     * assigned handle back to the host. */
+    int32_t chr_ids[L2_GATT_MAX_CHRS];
+    uint8_t chr_count;
+    /* True once the host sent a SEC_* frame and this bridge took pairing over.
+     * Until then the firmware keeps pairing the companion's way. */
+    bool sec_claimed;
 } L2App;
 
 /* Queue one framed message for the USB worker to send. */
@@ -69,7 +80,8 @@ static void on_coc(BleL2capCocEvent* ev, void* context) {
          * SDUs, so n always fits. Guard memory anyway, but never forward a
          * shortened SDU: drop it rather than truncate. */
         if(n > L2F_COC_MTU) {
-            FURI_LOG_E(TAG, "SDU %u above MTU %u on ch %u dropped", n, L2F_COC_MTU, ev->channel_index);
+            FURI_LOG_E(
+                TAG, "SDU %u above MTU %u on ch %u dropped", n, L2F_COC_MTU, ev->channel_index);
             break;
         }
         buf[0] = ev->channel_index;
@@ -92,7 +104,8 @@ static void on_coc(BleL2capCocEvent* ev, void* context) {
 }
 
 /* Inbound fixed-CID PDU (host thread). Frame it as [conn:2][cid:2][pdu...]. */
-static void on_fixed(uint16_t conn, uint16_t cid, const uint8_t* data, uint16_t len, void* context) {
+static void
+    on_fixed(uint16_t conn, uint16_t cid, const uint8_t* data, uint16_t len, void* context) {
     L2App* app = context;
     static uint8_t buf[4 + L2F_PAYLOAD_MAX];
     if(len > L2F_PAYLOAD_MAX - 4) len = L2F_PAYLOAD_MAX - 4;
@@ -103,6 +116,129 @@ static void on_fixed(uint16_t conn, uint16_t cid, const uint8_t* data, uint16_t 
     memcpy(buf + 4, data, len);
     app->rx_sdus++;
     l2_emit(app, L2F_FIXED_DATA, buf, len + 4);
+}
+
+/* Pairing events (dispatch thread): frame them for the host, which answers. */
+static void on_security(const BleSecurityEvent* ev, void* context) {
+    L2App* app = context;
+    uint8_t kind;
+    switch(ev->type) {
+    case BleSecurityEventTypePasskeyDisplay:
+        kind = 0;
+        break;
+    case BleSecurityEventTypePasskeyRequest:
+        kind = 1;
+        break;
+    case BleSecurityEventTypeNumericComparison:
+        kind = 2;
+        break;
+    case BleSecurityEventTypeOobRequest:
+        kind = 3;
+        break;
+    case BleSecurityEventTypeEncryptionChanged:
+        kind = 4;
+        break;
+    default:
+        kind = 5;
+        break;
+    }
+    uint8_t flags = (uint8_t)((ev->encrypted ? 0x01 : 0) | (ev->authenticated ? 0x02 : 0) |
+                              (ev->bonded ? 0x04 : 0));
+    uint8_t p[11] = {
+        kind,
+        (uint8_t)(ev->connection_handle & 0xFF),
+        (uint8_t)(ev->connection_handle >> 8),
+        (uint8_t)((uint16_t)ev->status & 0xFF),
+        (uint8_t)((uint16_t)ev->status >> 8),
+        (uint8_t)(ev->passkey & 0xFF),
+        (uint8_t)((ev->passkey >> 8) & 0xFF),
+        (uint8_t)((ev->passkey >> 16) & 0xFF),
+        (uint8_t)((ev->passkey >> 24) & 0xFF),
+        flags,
+        ev->key_size};
+    l2_emit(app, L2F_SEC_EVENT, p, sizeof(p));
+}
+
+/* Report one characteristic's assigned handles. */
+static void l2_emit_char_id(L2App* app, int32_t chr_id) {
+    uint16_t decl = 0;
+    uint16_t value = 0;
+    ble_gatt_server_char_handles(chr_id, &decl, &value);
+    uint8_t p[6] = {
+        1,
+        (uint8_t)chr_id,
+        (uint8_t)(decl & 0xFF),
+        (uint8_t)(decl >> 8),
+        (uint8_t)(value & 0xFF),
+        (uint8_t)(value >> 8)};
+    l2_emit(app, L2F_GATT_ID, p, sizeof(p));
+}
+
+/* GATT server events (dispatch thread). */
+static void on_gatt_server(const BleGattServerEvent* ev, void* context) {
+    L2App* app = context;
+    switch(ev->type) {
+    case BleGattServerEventTypeWrite: {
+        static uint8_t buf[4 + L2F_PAYLOAD_MAX];
+        uint16_t n = ev->data_len;
+        if(n > L2F_PAYLOAD_MAX - 4) n = L2F_PAYLOAD_MAX - 4;
+        buf[0] = (uint8_t)ev->char_id;
+        buf[1] = (uint8_t)(ev->connection_handle & 0xFF);
+        buf[2] = (uint8_t)(ev->connection_handle >> 8);
+        buf[3] = 0; /* value write */
+        if(n) memcpy(buf + 4, ev->data, n);
+        l2_emit(app, L2F_GATT_WRITE, buf, n + 4);
+    } break;
+    case BleGattServerEventTypeSubscribe: {
+        uint8_t p[6] = {
+            (uint8_t)ev->char_id,
+            (uint8_t)(ev->connection_handle & 0xFF),
+            (uint8_t)(ev->connection_handle >> 8),
+            1, /* CCCD */
+            (uint8_t)(ev->notify ? 1 : 0),
+            (uint8_t)(ev->indicate ? 1 : 0)};
+        l2_emit(app, L2F_GATT_WRITE, p, sizeof(p));
+    } break;
+    case BleGattServerEventTypeCommitted:
+        for(uint8_t i = 0; i < app->chr_count; i++)
+            l2_emit_char_id(app, app->chr_ids[i]);
+        l2_emit(app, L2F_GATT_READY, NULL, 0);
+        break;
+    default:
+        break;
+    }
+}
+
+/* Read a UUID laid out as [type:1][uuid:2 or 16]. Returns its length, or 0. */
+static uint16_t l2_read_uuid(const uint8_t* p, uint16_t avail, BleGattServerUuid* out) {
+    if(avail < 1) return 0;
+    memset(out, 0, sizeof(*out));
+    out->type = p[0];
+    if(p[0] == 16) {
+        if(avail < 3) return 0;
+        out->uuid16 = (uint16_t)p[1] | ((uint16_t)p[2] << 8);
+        return 3;
+    }
+    if(p[0] == 128) {
+        if(avail < 17) return 0;
+        memcpy(out->uuid128, p + 1, 16);
+        return 17;
+    }
+    return 0;
+}
+
+/* Take pairing over on the first SEC_* frame, not at startup: a bridge session
+ * that never pairs must leave the companion's pairing alone. */
+static void l2_security_claim(L2App* app) {
+    if(app->sec_claimed) return;
+    ble_security_init();
+    ble_security_set_callback(on_security, app);
+    app->sec_claimed = true;
+}
+
+static void l2_error(L2App* app, uint16_t code) {
+    uint8_t p[2] = {(uint8_t)(code & 0xFF), (uint8_t)(code >> 8)};
+    l2_emit(app, L2F_ERROR, p, sizeof(p));
 }
 
 static void l2_handle_frame(L2App* app, const L2Frame* f) {
@@ -153,6 +289,96 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
     case L2F_FIXED_UNREG:
         if(f->len >= 2)
             ble_l2cap_fixed_unregister((uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8));
+        break;
+    case L2F_SEC_CONFIG:
+        /* [io_cap:1][flags:1][our_kd:1][their_kd:1] */
+        l2_security_claim(app);
+        if(f->len >= 4) {
+            uint8_t flags = f->data[1];
+            if(!ble_security_configure(
+                   (BleSecurityIoCapability)f->data[0],
+                   (flags & 0x01) != 0,
+                   (flags & 0x02) != 0,
+                   (flags & 0x04) != 0,
+                   f->data[2],
+                   f->data[3]))
+                l2_error(app, 0x0008);
+        }
+        break;
+    case L2F_SEC_PAIR:
+        l2_security_claim(app);
+        if(f->len >= 2) {
+            uint16_t conn = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+            if(!ble_security_pair(conn)) l2_error(app, 0x0008);
+        }
+        break;
+    case L2F_SEC_PASSKEY:
+        /* [conn:2][passkey:4] */
+        if(f->len >= 6) {
+            uint16_t conn = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+            uint32_t passkey = (uint32_t)f->data[2] | ((uint32_t)f->data[3] << 8) |
+                               ((uint32_t)f->data[4] << 16) | ((uint32_t)f->data[5] << 24);
+            if(!ble_security_passkey_reply(conn, passkey)) l2_error(app, 0x0008);
+        }
+        break;
+    case L2F_SEC_CONFIRM:
+        if(f->len >= 3) {
+            uint16_t conn = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+            if(!ble_security_numeric_comparison_reply(conn, f->data[2] != 0))
+                l2_error(app, 0x0008);
+        }
+        break;
+    case L2F_GATT_SERVICE: {
+        /* [primary:1][uuid_type:1][uuid...] */
+        BleGattServerUuid uuid;
+        if(f->len < 2 || !l2_read_uuid(f->data + 1, f->len - 1, &uuid)) {
+            l2_error(app, 0x0009);
+            break;
+        }
+        int32_t svc = ble_gatt_server_service_add(&uuid, f->data[0] != 0);
+        if(svc < 0) {
+            l2_error(app, 0x0009);
+            break;
+        }
+        uint8_t p[6] = {0, (uint8_t)svc, 0, 0, 0, 0};
+        l2_emit(app, L2F_GATT_ID, p, sizeof(p));
+    } break;
+    case L2F_GATT_CHAR: {
+        /* [svc_id:1][flags:2][max_len:2][uuid_type:1][uuid...][init...] */
+        BleGattServerUuid uuid;
+        uint16_t used = 5;
+        uint16_t ulen = f->len > used ? l2_read_uuid(f->data + used, f->len - used, &uuid) : 0;
+        if(f->len < 6 || !ulen || app->chr_count >= L2_GATT_MAX_CHRS) {
+            l2_error(app, 0x0009);
+            break;
+        }
+        used += ulen;
+        uint16_t flags = (uint16_t)f->data[1] | ((uint16_t)f->data[2] << 8);
+        uint16_t max_len = (uint16_t)f->data[3] | ((uint16_t)f->data[4] << 8);
+        int32_t chr = ble_gatt_server_char_add(
+            f->data[0], &uuid, flags, max_len, f->data + used, f->len - used);
+        if(chr < 0) {
+            l2_error(app, 0x0009);
+            break;
+        }
+        app->chr_ids[app->chr_count++] = chr;
+        l2_emit_char_id(app, chr);
+    } break;
+    case L2F_GATT_COMMIT:
+        if(!ble_gatt_server_commit()) l2_error(app, 0x0009);
+        break;
+    case L2F_GATT_SET:
+        if(f->len >= 1) {
+            if(!ble_gatt_server_char_set_value(f->data[0], f->data + 1, f->len - 1))
+                l2_error(app, 0x0009);
+        }
+        break;
+    case L2F_GATT_RESET:
+        /* Drop everything this bridge defined and rebuild without it. */
+        ble_gatt_server_deinit();
+        app->chr_count = 0;
+        ble_gatt_server_init();
+        ble_gatt_server_set_callback(on_gatt_server, app);
         break;
     case L2F_CLOSE:
         if(f->len >= 1) ble_l2cap_coc_disconnect(f->data[0]);
@@ -342,6 +568,10 @@ int32_t tailcat_l2cap_app(void* context) {
     ble_l2cap_coc_set_callback(0, on_coc, app);
     ble_l2cap_fixed_init();
     ble_l2cap_fixed_set_callback(on_fixed, app);
+    /* GATT fixtures the host defines (TASK-666). Registering the consumer adds
+     * no services, so the companion's GATT table is untouched until it does. */
+    ble_gatt_server_init();
+    ble_gatt_server_set_callback(on_gatt_server, app);
 
     Gui* gui = furi_record_open(RECORD_GUI);
     ViewPort* viewport = view_port_alloc();
@@ -389,6 +619,12 @@ int32_t tailcat_l2cap_app(void* context) {
         app->central = NULL;
     }
     furi_ble_adv_clear(); /* restore the companion advertisement */
+    if(app->sec_claimed) {
+        ble_security_set_callback(NULL, NULL);
+        ble_security_deinit(); /* give pairing back to the firmware */
+    }
+    ble_gatt_server_set_callback(NULL, NULL);
+    ble_gatt_server_deinit(); /* removes our services and rebuilds the table */
     ble_l2cap_fixed_set_callback(NULL, NULL);
     ble_l2cap_fixed_deinit();
     ble_l2cap_coc_set_callback(0, NULL, NULL);

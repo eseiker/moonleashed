@@ -22,11 +22,12 @@
 _Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must fit a frame");
 
 /* Host -> FAP */
-#define L2F_LISTEN     0x01 /* [psm:2]                     start a CoC server   */
-#define L2F_SEND       0x02 /* [channel:1][data...]        send an SDU          */
-#define L2F_CLOSE      0x03 /* [channel:1]                 disconnect a channel */
-#define L2F_CONNECT    0x04 /* [psm:2][name...]            central: scan+connect, then CoC client on psm */
-#define L2F_ADVERTISE  0x05 /* [adv_len:1][adv...][rsp...] install raw advertisement */
+#define L2F_LISTEN 0x01 /* [psm:2]                     start a CoC server   */
+#define L2F_SEND   0x02 /* [channel:1][data...]        send an SDU          */
+#define L2F_CLOSE  0x03 /* [channel:1]                 disconnect a channel */
+#define L2F_CONNECT \
+    0x04 /* [psm:2][name...]            central: scan+connect, then CoC client on psm */
+#define L2F_ADVERTISE 0x05 /* [adv_len:1][adv...][rsp...] install raw advertisement */
 
 /* Fixed L2CAP CID relay (TASK-663), a separate family from the CoC frames so
  * their numbering is untouched. These carry a raw L2CAP CID and a connection
@@ -35,8 +36,25 @@ _Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must
 #define L2F_FIXED_SEND     0x11 /* [conn:2][cid:2][pdu...]          transmit a PDU    */
 #define L2F_FIXED_UNREG    0x12 /* [cid:2]                          stop relaying     */
 
+/* Pairing / SMP control (TASK-665). The first SEC_* frame takes pairing over
+ * from the firmware; until then the firmware pairs the companion's way.
+ * SEC_CONFIG payload is [io_cap:1][flags:1][our_kd:1][their_kd:1], where flags
+ * is bit0 bonding, bit1 MITM, bit2 secure connections. */
+#define L2F_SEC_CONFIG  0x20
+#define L2F_SEC_PAIR    0x21 /* [conn:2]                 start pairing / encryption */
+#define L2F_SEC_PASSKEY 0x22 /* [conn:2][passkey:4]      answer a passkey prompt     */
+#define L2F_SEC_CONFIRM 0x23 /* [conn:2][accept:1]       answer a numeric comparison */
+
+/* Runtime GATT server (TASK-666): define and serve fixtures from the host. */
+#define L2F_GATT_SERVICE 0x30 /* [primary:1][uuid_type:1][uuid:2|16]  add a service */
+#define L2F_GATT_CHAR    0x31 /* [svc_id:1][flags:2][max_len:2][uuid_type:1][uuid:2|16][init...] */
+#define L2F_GATT_COMMIT  0x32 /* []                       rebuild the attribute table */
+#define L2F_GATT_SET     0x33 /* [chr_id:1][value...]     store a value, notify peers */
+#define L2F_GATT_RESET   0x34 /* []                       remove every service we added */
+
 /* FAP -> Host */
-#define L2F_CONNECTED    0x81 /* [channel:1][conn:2][peer_mtu:2] — peer_mtu is the
+#define L2F_CONNECTED \
+    0x81 /* [channel:1][conn:2][peer_mtu:2] — peer_mtu is the
                                 * peer's CoC SDU MTU; cap SENDs at min(peer_mtu,
                                 * L2F_COC_MTU). Appended field: readers of the old
                                 * 3-byte payload keep working. */
@@ -44,6 +62,16 @@ _Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must
 #define L2F_DISCONNECTED 0x83 /* [channel:1]          */
 #define L2F_ERROR        0x84 /* [code:2]             */
 #define L2F_FIXED_DATA   0x90 /* [conn:2][cid:2][pdu...] inbound fixed-CID PDU */
+/* SEC_EVENT payload: [kind:1][conn:2][status:2][passkey:4][flags:1][key_size:1].
+ * kind is 0 passkey display, 1 passkey request, 2 numeric comparison,
+ * 3 OOB request, 4 encryption changed, 5 repeat pairing.
+ * flags is bit0 encrypted, bit1 authenticated, bit2 bonded. */
+#define L2F_SEC_EVENT    0xA0
+#define L2F_GATT_ID      0xB0 /* [kind:1][id:1][decl:2][value:2] kind 0 service, 1 characteristic */
+/* GATT_WRITE payload: [chr_id:1][conn:2][kind:1][data...], where kind 0 is a
+ * value write and kind 1 a CCCD change with data [notify:1][indicate:1]. */
+#define L2F_GATT_WRITE   0xB1
+#define L2F_GATT_READY   0xB2 /* []  the attribute table was rebuilt; handles are valid */
 
 typedef struct {
     uint8_t type;
