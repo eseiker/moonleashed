@@ -137,6 +137,11 @@ uint32_t nimble_glue_rx_bytes(void);
 /* Terminate the active connection, if any. */
 void nimble_glue_disconnect(void);
 
+/* Terminate one link by handle, whatever role it has (TASK-688). reason is an
+ * HCI error code; 0 uses BLE_ERR_REM_USER_CONN_TERM. Returns the NimBLE rc: 0
+ * on success, BLE_HS_ENOTCONN when the link is already gone. */
+int nimble_glue_link_terminate(uint16_t conn_handle, uint8_t reason);
+
 /* Clear all bonds: the in-RAM store and the persisted file. */
 void nimble_glue_forget_bonds(void);
 

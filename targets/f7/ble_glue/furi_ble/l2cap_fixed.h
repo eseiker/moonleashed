@@ -29,7 +29,8 @@ typedef void (*BleL2capFixedCallback)(
 /** Link callback. connected is true when a link on which the registered CIDs
  *  are available came up, false when it went down. The same link can be
  *  reported up more than once, so treat the reports as idempotent. */
-typedef void (*BleL2capFixedLinkCallback)(uint16_t connection_handle, bool connected, void* context);
+typedef void (
+    *BleL2capFixedLinkCallback)(uint16_t connection_handle, bool connected, void* context);
 
 /** Initialize the fixed-CID relay (idempotent). */
 void ble_l2cap_fixed_init(void);

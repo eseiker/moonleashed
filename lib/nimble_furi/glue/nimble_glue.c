@@ -1004,6 +1004,13 @@ void nimble_glue_disconnect(void) {
     }
 }
 
+int nimble_glue_link_terminate(uint16_t conn_handle, uint8_t reason) {
+    if(conn_handle == BLE_HS_CONN_HANDLE_NONE) return BLE_HS_ENOTCONN;
+    int rc = ble_gap_terminate(conn_handle, reason ? reason : BLE_ERR_REM_USER_CONN_TERM);
+    FURI_LOG_I(TAG, "Terminate link %u reason 0x%02X rc=%d", conn_handle, reason, rc);
+    return rc;
+}
+
 void nimble_glue_forget_bonds(void) {
     /* Drop the in-RAM bonds and the persisted copy. */
     ble_store_clear();

@@ -17,6 +17,7 @@
 #include <furi_ble/l2cap_fixed.h>
 #include <furi_ble/security.h>
 #include <furi_ble/gatt_server.h>
+#include <furi_ble/link.h>
 #include <furi_ble/adv.h>
 #include <furi_ble/furi_ble_session.h>
 #include "l2cap_frame.h"
@@ -384,6 +385,15 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
         app->chr_ids[app->chr_count++] = chr;
         l2_emit_char_id(app, chr);
     } break;
+    case L2F_LINK_DISCONNECT:
+        /* [conn:2][reason:1]: drop a link the host no longer wants. */
+        if(f->len >= 3) {
+            uint16_t conn = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+            BleLinkDisconnectStatus st = ble_link_disconnect(conn, f->data[2]);
+            uint8_t p[3] = {(uint8_t)conn, (uint8_t)(conn >> 8), (uint8_t)st};
+            l2_emit(app, L2F_LINK_STATUS, p, sizeof(p));
+        }
+        break;
     case L2F_GATT_COMMIT:
         if(!ble_gatt_server_commit()) l2_error(app, 0x0009);
         break;

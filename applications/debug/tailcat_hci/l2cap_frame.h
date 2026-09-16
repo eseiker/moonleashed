@@ -45,6 +45,12 @@ _Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must
 #define L2F_SEC_PASSKEY 0x22 /* [conn:2][passkey:4]      answer a passkey prompt     */
 #define L2F_SEC_CONFIRM 0x23 /* [conn:2][accept:1]       answer a numeric comparison */
 
+/* Link control (TASK-688). A protocol that walks several connections abandons a
+ * stage by dropping the link itself. The connection handle is the one
+ * FIXED_LINK reported; reason 0 means remote user terminated. The link going
+ * down is reported by FIXED_LINK as usual. */
+#define L2F_LINK_DISCONNECT 0x40 /* [conn:2][reason:1] */
+
 /* Runtime GATT server (TASK-666): define and serve fixtures from the host. */
 #define L2F_GATT_SERVICE 0x30 /* [primary:1][uuid_type:1][uuid:2|16]  add a service */
 #define L2F_GATT_CHAR    0x31 /* [svc_id:1][flags:2][max_len:2][uuid_type:1][uuid:2|16][init...] */
@@ -77,6 +83,10 @@ _Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must
  * value write and kind 1 a CCCD change with data [notify:1][indicate:1]. */
 #define L2F_GATT_WRITE   0xB1
 #define L2F_GATT_READY   0xB2 /* []  the attribute table was rebuilt; handles are valid */
+/* Answer to LINK_DISCONNECT: status 0 accepted, 1 no such link (already gone),
+ * 2 refused. It reports only that the request was taken, not that the link is
+ * down; FIXED_LINK reports that. */
+#define L2F_LINK_STATUS  0xC0 /* [conn:2][status:1] */
 
 typedef struct {
     uint8_t type;
