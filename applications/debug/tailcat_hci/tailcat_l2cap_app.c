@@ -15,6 +15,7 @@
 
 #include <furi_ble/l2cap_coc.h>
 #include <furi_ble/adv.h>
+#include <furi_ble/furi_ble_session.h>
 #include "l2cap_frame.h"
 
 #define TAG "TailcatL2cap"
@@ -32,6 +33,10 @@ typedef struct {
     volatile bool connected;
     volatile uint32_t rx_sdus; /* SDUs BLE -> USB */
     volatile uint32_t tx_sdus; /* SDUs USB -> BLE */
+    /* L2F_CONNECT: modal central session (companion suspended while it runs). */
+    FuriBleSession* central;
+    uint16_t central_psm;
+    volatile bool central_coc_opened; /* a CoC opened on the central link */
 } L2App;
 
 /* Queue one framed message for the USB worker to send. */
@@ -51,6 +56,7 @@ static void on_coc(BleL2capCocEvent* ev, void* context) {
             (uint8_t)(ev->connection_handle & 0xFF),
             (uint8_t)(ev->connection_handle >> 8)};
         app->connected = true;
+        if(app->central) app->central_coc_opened = true;
         l2_emit(app, L2F_CONNECTED, p, sizeof(p));
     } break;
     case BleL2capCocEventDataReceived: {
@@ -92,6 +98,13 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
         break;
     case L2F_CLOSE:
         if(f->len >= 1) ble_l2cap_coc_disconnect(f->data[0]);
+        /* On a central session, closing the channel ends the session too: the
+         * link drops and the companion is restored. */
+        if(app->central) {
+            furi_ble_session_free(app->central);
+            app->central = NULL;
+            app->central_coc_opened = false;
+        }
         break;
     case L2F_ADVERTISE:
         /* [adv_len:1][adv...][rsp...]: install the caller's advertisement (e.g.
@@ -108,10 +121,72 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
         }
         break;
     case L2F_CONNECT: {
-        /* Central (Flipper connects out) is not wired in this slice; report. */
-        uint8_t code[2] = {0xFF, 0xFF};
-        l2_emit(app, L2F_ERROR, code, sizeof(code));
+        /* [psm:2][name...]: suspend the companion, scan for `name`, connect as
+         * central, then open a CoC client on psm once the link is up (the
+         * session's Connected event is handled in l2_poll_central). */
+        if(f->len < 3) break;
+        if(app->central) {
+            uint8_t code[2] = {0x02, 0x00}; /* a central session is already active */
+            l2_emit(app, L2F_ERROR, code, sizeof(code));
+            break;
+        }
+        char name[24];
+        uint16_t nlen = f->len - 2;
+        if(nlen > sizeof(name) - 1) nlen = sizeof(name) - 1;
+        memcpy(name, f->data + 2, nlen);
+        name[nlen] = '\0';
+        app->central_psm = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+        app->central_coc_opened = false;
+        FuriBleSessionConfig cfg = {.role = FuriBleRoleCentralModal, .central_name = name};
+        app->central = furi_ble_session_alloc(&cfg);
+        if(!app->central) {
+            uint8_t code[2] = {0x02, 0x00}; /* refused: host not ready or busy */
+            l2_emit(app, L2F_ERROR, code, sizeof(code));
+        }
     } break;
+    default:
+        break;
+    }
+}
+
+/* Drain the central session's off-thread event queue (worker thread). */
+static void l2_poll_central(L2App* app) {
+    if(!app->central) return;
+    FuriBleEvent ev;
+    if(!furi_ble_session_get_event(app->central, &ev, 0)) return;
+    switch(ev.type) {
+    case FuriBleEventCentralConnected:
+        /* Link is up: open the CoC as the client. Its Connected/Data events
+         * then flow through on_coc like the server path. */
+        if(!ble_l2cap_coc_connect(
+               ev.conn_handle,
+               app->central_psm,
+               BLE_L2CAP_COC_MTU_DEFAULT,
+               BLE_L2CAP_COC_MPS_MAX,
+               BLE_L2CAP_COC_CREDITS_DEFAULT)) {
+            uint8_t code[2] = {0x03, 0x00}; /* CoC client open failed */
+            l2_emit(app, L2F_ERROR, code, sizeof(code));
+            furi_ble_session_free(app->central);
+            app->central = NULL;
+        }
+        break;
+    case FuriBleEventCentralFailed: {
+        uint8_t code[2] = {0x02, 0x00}; /* peer not found / connect failed */
+        l2_emit(app, L2F_ERROR, code, sizeof(code));
+        furi_ble_session_free(app->central);
+        app->central = NULL;
+    } break;
+    case FuriBleEventCentralDisconnected:
+        /* A CoC that opened already reported DISCONNECTED via on_coc; if the
+         * link went before any CoC opened, tell the host. */
+        if(!app->central_coc_opened) {
+            uint8_t code[2] = {0x04, 0x00}; /* link lost before the CoC opened */
+            l2_emit(app, L2F_ERROR, code, sizeof(code));
+        }
+        furi_ble_session_free(app->central);
+        app->central = NULL;
+        app->central_coc_opened = false;
+        break;
     default:
         break;
     }
@@ -159,6 +234,8 @@ static int32_t l2_worker(void* context) {
                 l2f_reset(&frame);
             }
         }
+        /* Central session lifecycle (L2F_CONNECT). */
+        l2_poll_central(app);
         /* BLE -> USB: drain the framed tx stream in <=63-byte chunks. */
         while(furi_stream_buffer_bytes_available(app->tx) && !app->failed) {
             size_t chunk = furi_stream_buffer_receive(app->tx, out, 63, 0);
@@ -237,6 +314,10 @@ int32_t tailcat_l2cap_app(void* context) {
         cli_vcp_enable(cli);
     }
 
+    if(app->central) {
+        furi_ble_session_free(app->central); /* drop the link, restore the companion */
+        app->central = NULL;
+    }
     furi_ble_adv_clear(); /* restore the companion advertisement */
     ble_l2cap_coc_set_callback(0, NULL, NULL);
     ble_l2cap_coc_deinit();

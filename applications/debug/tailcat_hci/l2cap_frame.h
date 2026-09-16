@@ -15,7 +15,7 @@
 #define L2F_LISTEN     0x01 /* [psm:2]                     start a CoC server   */
 #define L2F_SEND       0x02 /* [channel:1][data...]        send an SDU          */
 #define L2F_CLOSE      0x03 /* [channel:1]                 disconnect a channel */
-#define L2F_CONNECT    0x04 /* [name...]                   central: scan+connect */
+#define L2F_CONNECT    0x04 /* [psm:2][name...]            central: scan+connect, then CoC client on psm */
 #define L2F_ADVERTISE  0x05 /* [adv_len:1][adv...][rsp...] install raw advertisement */
 
 /* FAP -> Host */
