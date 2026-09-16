@@ -73,6 +73,24 @@ bool nimble_glue_is_scanning(void);
 bool nimble_glue_central_probe_start(void);
 void nimble_glue_central_probe_stop(void);
 
+/* General modal central session (TASK-615 M2 / TASK-633). Suspend the companion,
+ * scan for a peer advertising `name`, connect as central, and report lifecycle
+ * through cb (called on the host thread). The caller then drives the link with
+ * ble_gatt_client_* / ble_l2cap_coc_* on the reported conn_handle. Only one
+ * central session runs at a time; nimble_glue_central_stop restores the
+ * companion. The DCT helper below is a thin wrapper over this. */
+typedef enum {
+    NimbleCentralConnected, /* conn_handle valid */
+    NimbleCentralDisconnected, /* status = disconnect reason */
+    NimbleCentralFailed, /* status = connect failure code */
+} NimbleCentralEventKind;
+typedef void (
+    *NimbleCentralCb)(NimbleCentralEventKind kind, uint16_t conn_handle, int status, void* ctx);
+bool nimble_glue_central_start(const char* name, NimbleCentralCb cb, void* ctx);
+void nimble_glue_central_stop(void);
+bool nimble_glue_central_is_active(void);
+uint16_t nimble_glue_central_conn_handle(void);
+
 /* Modal DCT central session (TASK-615, Milestone 2). Suspends the companion,
  * scans for a peer advertising the name "FlipperDCT", connects to it as central,
  * and opens an L2CAP CoC as the client on the given PSM. On CoC connect the

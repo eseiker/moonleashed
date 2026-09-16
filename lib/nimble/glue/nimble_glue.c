@@ -89,22 +89,24 @@ static FuriSemaphore* stop_sem;
 static void start_advertise(void);
 static void start_scan(void);
 
-/* Modal DCT central session (TASK-615, Milestone 2). Peer discovered by name. */
-#define DCT_PEER_NAME "FlipperDCT"
-#define DCT_IDLE       0
-#define DCT_SCANNING   1
-#define DCT_CONNECTING 2
-#define DCT_RUNNING    3
+/* Modal central session (TASK-615 M2 / TASK-633). Peer discovered by name. */
+#define DCT_PEER_NAME      "FlipperDCT"
+#define CENTRAL_IDLE       0
+#define CENTRAL_SCANNING   1
+#define CENTRAL_CONNECTING 2
+#define CENTRAL_RUNNING    3
 static struct {
     volatile bool active;
     volatile int state;
     uint8_t peer[6];
     uint8_t peer_type;
-    uint16_t psm;
     uint16_t conn_handle;
-} dct;
-static int dct_gap_event(struct ble_gap_event* event, void* arg);
-static void dct_finish(void);
+    char name[24];
+    NimbleCentralCb cb;
+    void* ctx;
+} central;
+static int central_gap_event(struct ble_gap_event* event, void* arg);
+static void central_finish(void);
 
 /* Re-arm connectable advertising when a peripheral slot is still free, so the
  * Flipper can hold a second incoming link (companion + a separate CoC central,
@@ -136,24 +138,24 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             event->disc.addr.val[0],
             event->disc.addr.type,
             event->disc.rssi);
-        /* During a modal DCT session, match the peer by advertised name, then
-         * stop scanning and connect to it as central. */
-        if(dct.active && dct.state == DCT_SCANNING) {
+        /* During a modal central session, match the peer by advertised name,
+         * then stop scanning and connect to it as central. */
+        if(central.active && central.state == CENTRAL_SCANNING) {
             struct ble_hs_adv_fields f;
-            if(ble_hs_adv_parse_fields(&f, event->disc.data, event->disc.length_data) == 0 &&
-               f.name != NULL && f.name_len == strlen(DCT_PEER_NAME) &&
-               memcmp(f.name, DCT_PEER_NAME, f.name_len) == 0) {
-                memcpy(dct.peer, event->disc.addr.val, 6);
-                dct.peer_type = event->disc.addr.type;
-                dct.state = DCT_CONNECTING;
+            size_t nlen = strlen(central.name);
+            if(nlen && ble_hs_adv_parse_fields(&f, event->disc.data, event->disc.length_data) == 0 &&
+               f.name != NULL && f.name_len == nlen && memcmp(f.name, central.name, nlen) == 0) {
+                memcpy(central.peer, event->disc.addr.val, 6);
+                central.peer_type = event->disc.addr.type;
+                central.state = CENTRAL_CONNECTING;
                 glue.scanning = false;
                 ble_gap_disc_cancel();
-                ble_addr_t peer = {.type = dct.peer_type};
-                memcpy(peer.val, dct.peer, 6);
+                ble_addr_t peer = {.type = central.peer_type};
+                memcpy(peer.val, central.peer, 6);
                 int rc = ble_gap_connect(
-                    glue.addr_type, &peer, 5000, NULL, dct_gap_event, NULL);
-                FURI_LOG_I(TAG, "DCT peer '%s' found, central connect rc=%d", DCT_PEER_NAME, rc);
-                if(rc != 0) dct_finish();
+                    glue.addr_type, &peer, 5000, NULL, central_gap_event, NULL);
+                FURI_LOG_I(TAG, "Central peer '%s' found, connect rc=%d", central.name, rc);
+                if(rc != 0) central_finish();
             }
         }
         break;
@@ -591,46 +593,50 @@ void nimble_glue_central_probe_stop(void) {
     maybe_advertise(); /* restore the companion */
 }
 
-/* End the modal DCT session and restore the companion. */
-static void dct_finish(void) {
-    dct.active = false;
-    dct.state = DCT_IDLE;
-    dct.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+/* End the modal central session and restore the companion. */
+static void central_finish(void) {
+    central.active = false;
+    central.state = CENTRAL_IDLE;
+    central.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    central.cb = NULL;
+    central.ctx = NULL;
     glue.central_probe = false; /* let the companion advertise again */
     glue.scanning = false;
     maybe_advertise();
-    FURI_LOG_I(TAG, "DCT session ended, companion restored");
+    FURI_LOG_I(TAG, "Central session ended, companion restored");
 }
 
-/* GAP events for the modal DCT central link. Kept separate from gap_event so the
- * central connection never binds the companion Serial/HID services. */
-static int dct_gap_event(struct ble_gap_event* event, void* arg) {
+/* GAP events for the modal central link. Kept separate from gap_event so the
+ * central connection never binds the companion Serial/HID services. Lifecycle is
+ * reported to central.cb; the caller drives the link (GATT client / CoC). */
+static int central_gap_event(struct ble_gap_event* event, void* arg) {
     UNUSED(arg);
     switch(event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if(event->connect.status == 0) {
-            dct.conn_handle = event->connect.conn_handle;
-            dct.state = DCT_RUNNING;
-            FURI_LOG_I(
-                TAG,
-                "DCT central link up handle=%u, opening CoC PSM 0x%04X",
-                dct.conn_handle,
-                dct.psm);
-            int rc = coc_client_connect(dct.conn_handle, dct.psm);
-            if(rc != 0) {
-                FURI_LOG_E(TAG, "coc_client_connect rc=%d", rc);
-                ble_gap_terminate(dct.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-            }
+            central.conn_handle = event->connect.conn_handle;
+            central.state = CENTRAL_RUNNING;
+            FURI_LOG_I(TAG, "Central link up handle=%u", central.conn_handle);
+            if(central.cb) central.cb(NimbleCentralConnected, central.conn_handle, 0, central.ctx);
         } else {
-            FURI_LOG_W(TAG, "DCT central connect failed: %d", event->connect.status);
-            dct_finish();
+            FURI_LOG_W(TAG, "Central connect failed: %d", event->connect.status);
+            NimbleCentralCb cb = central.cb;
+            void* ctx = central.ctx;
+            central_finish();
+            if(cb) cb(NimbleCentralFailed, 0, event->connect.status, ctx);
         }
         return 0;
 
-    case BLE_GAP_EVENT_DISCONNECT:
-        FURI_LOG_I(TAG, "DCT central link down, reason %d", event->disconnect.reason);
-        dct_finish();
+    case BLE_GAP_EVENT_DISCONNECT: {
+        FURI_LOG_I(TAG, "Central link down, reason %d", event->disconnect.reason);
+        NimbleCentralCb cb = central.cb;
+        void* ctx = central.ctx;
+        uint16_t h = central.conn_handle;
+        int reason = event->disconnect.reason;
+        central_finish();
+        if(cb) cb(NimbleCentralDisconnected, h, reason, ctx);
         return 0;
+    }
 
     case BLE_GAP_EVENT_NOTIFY_RX: {
         /* Forward notifications/indications on the central link to the GATT
@@ -650,13 +656,15 @@ static int dct_gap_event(struct ble_gap_event* event, void* arg) {
     }
 }
 
-bool nimble_glue_dct_connect(uint16_t psm) {
-    if(!glue.synced || dct.active) return false;
-    memset(&dct, 0, sizeof(dct));
-    dct.active = true;
-    dct.state = DCT_SCANNING;
-    dct.psm = psm;
-    dct.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+bool nimble_glue_central_start(const char* name, NimbleCentralCb cb, void* ctx) {
+    if(!glue.synced || central.active) return false;
+    memset(&central, 0, sizeof(central));
+    central.active = true;
+    central.state = CENTRAL_SCANNING;
+    central.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    central.cb = cb;
+    central.ctx = ctx;
+    strncpy(central.name, name ? name : "", sizeof(central.name) - 1);
     /* Suspend the companion; the scan starts from the DISCONNECT handler once the
      * last peripheral link is gone (or immediately if nothing is connected). */
     glue.central_probe = true;
@@ -671,23 +679,57 @@ bool nimble_glue_dct_connect(uint16_t psm) {
     if(glue.conn_count == 0) {
         start_scan();
     }
-    FURI_LOG_I(TAG, "DCT session started, scanning for '%s' PSM 0x%04X", DCT_PEER_NAME, psm);
+    FURI_LOG_I(TAG, "Central session started, scanning for '%s'", central.name);
     return true;
 }
 
-void nimble_glue_dct_stop(void) {
-    if(!dct.active) return;
-    if(dct.state == DCT_RUNNING && dct.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        /* Drop the central link; dct_gap_event's DISCONNECT runs dct_finish. */
-        ble_gap_terminate(dct.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+void nimble_glue_central_stop(void) {
+    if(!central.active) return;
+    if(central.state == CENTRAL_RUNNING && central.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        /* Drop the central link; central_gap_event's DISCONNECT runs central_finish. */
+        ble_gap_terminate(central.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
     } else {
         if(glue.scanning) ble_gap_disc_cancel();
-        dct_finish();
+        central_finish();
     }
 }
 
+bool nimble_glue_central_is_active(void) {
+    return central.active;
+}
+
+uint16_t nimble_glue_central_conn_handle(void) {
+    return central.conn_handle;
+}
+
+/* --- DCT helper: a central session that opens a CoC client on connect -------- */
+
+static uint16_t dct_psm;
+
+static void dct_central_cb(NimbleCentralEventKind kind, uint16_t conn, int status, void* ctx) {
+    UNUSED(status);
+    UNUSED(ctx);
+    if(kind == NimbleCentralConnected) {
+        FURI_LOG_I(TAG, "DCT: opening CoC PSM 0x%04X on handle %u", dct_psm, conn);
+        int rc = coc_client_connect(conn, dct_psm);
+        if(rc != 0) {
+            FURI_LOG_E(TAG, "coc_client_connect rc=%d", rc);
+            ble_gap_terminate(conn, BLE_ERR_REM_USER_CONN_TERM);
+        }
+    }
+}
+
+bool nimble_glue_dct_connect(uint16_t psm) {
+    dct_psm = psm;
+    return nimble_glue_central_start(DCT_PEER_NAME, dct_central_cb, NULL);
+}
+
+void nimble_glue_dct_stop(void) {
+    nimble_glue_central_stop();
+}
+
 bool nimble_glue_dct_is_active(void) {
-    return dct.active;
+    return nimble_glue_central_is_active();
 }
 
 uint32_t nimble_glue_dct_rx_bytes(void) {
