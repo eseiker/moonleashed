@@ -99,7 +99,6 @@ upstream_sources = [
     "nimble/nimble/host/src/ble_l2cap_sig.c",
     "nimble/nimble/host/src/ble_l2cap_sig_cmd.c",
     "nimble/nimble/host/src/ble_sm.c",
-    "nimble/nimble/host/src/ble_sm_alg.c",
     "nimble/nimble/host/src/ble_sm_cmd.c",
     "nimble/nimble/host/src/ble_sm_lgcy.c",
     "nimble/nimble/host/src/ble_sm_sc.c",
@@ -121,6 +120,22 @@ upstream_sources = [
 # Everything Flipper-specific: glue + NPL-over-FURI.
 furi_sources = libenv.GlobRecursive("*.c", "nimble_furi")
 
-lib = libenv.StaticLibrary("${FW_LIB_NAME}", upstream_sources + furi_sources)
+# ble_sm_alg.c is compiled apart from the list above so the rename below applies
+# to its definitions only, not to the callers in ble_sm_sc.c (TASK-698). P-256
+# runs on the chip's PKA accelerator, so upstream's two mbedtls ECC functions
+# are renamed out of the way; callers keep using the real names and reach
+# lib/nimble_furi/glue/sm_alg_pka.c instead. Renamed and uncalled, the mbedtls
+# versions are dropped by --gc-sections, and the bignum and ecp code they pull
+# in goes with them.
+sm_alg_obj = libenv.Object(
+    "nimble/nimble/host/src/ble_sm_alg.c",
+    CPPDEFINES=list(libenv["CPPDEFINES"])
+    + [
+        ("ble_sm_alg_gen_key_pair", "nmbl_mbedtls_gen_key_pair"),
+        ("ble_sm_alg_gen_dhkey", "nmbl_mbedtls_gen_dhkey"),
+    ],
+)
+
+lib = libenv.StaticLibrary("${FW_LIB_NAME}", upstream_sources + furi_sources + sm_alg_obj)
 libenv.Install("${LIB_DIST_DIR}", lib)
 Return("lib")

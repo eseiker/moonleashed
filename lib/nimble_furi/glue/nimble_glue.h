@@ -159,6 +159,10 @@ bool nimble_glue_hid_battery_level(uint8_t level);
 /* True if the HCI transport latched a fault. */
 bool nimble_glue_faulted(void);
 
+/* Check the PKA P-256 backend against a NIST test vector (TASK-698). Returns
+ * false when Secure Connections is not built. */
+bool sm_alg_pka_selftest(void);
+
 /* Gracefully stops the host (ble_hs_stop), exits the host thread, stops the HCI
  * reader, and frees every NPL FURI object. After this the FAP can unload
  * without a reboot; the caller still releases the controller afterwards. */

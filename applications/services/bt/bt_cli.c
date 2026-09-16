@@ -254,11 +254,19 @@ static void bt_cli_command_nimble_coc(PipeSide* pipe, FuriString* args, void* co
     printf("DCT stopped. rx=%lu bytes. Companion restored.\r\n", nimble_glue_dct_rx_bytes());
 }
 
+static void bt_cli_command_pka_test(PipeSide* pipe, FuriString* args, void* context) {
+    UNUSED(pipe);
+    UNUSED(args);
+    UNUSED(context);
+    printf("PKA P-256 self-test: %s\r\n", sm_alg_pka_selftest() ? "PASS" : "FAIL (see the log)");
+}
+
 static void bt_cli_print_usage(void) {
     printf("Usage:\r\n");
     printf("bt <cmd> <args>\r\n");
     printf("Cmd list:\r\n");
     printf("\thci_info\t - HCI info\r\n");
+    printf("\tpka_test\t - PKA P-256 self-test against a NIST vector\r\n");
     printf("\tnimble_scan\t - NimBLE central scan probe (suspends companion)\r\n");
     printf("\tnimble_coc <psm>\t - NimBLE modal DCT: connect to 'FlipperDCT' + CoC\r\n");
     if(furi_hal_rtc_is_flag_set(FuriHalRtcFlagDebug) && furi_hal_bt_is_testing_supported()) {
@@ -286,6 +294,10 @@ static void bt_cli(PipeSide* pipe, FuriString* args, void* context) {
         }
         if(furi_string_cmp_str(cmd, "hci_info") == 0) {
             bt_cli_command_hci_info(pipe, args, NULL);
+            break;
+        }
+        if(furi_string_cmp_str(cmd, "pka_test") == 0) {
+            bt_cli_command_pka_test(pipe, args, NULL);
             break;
         }
         if(furi_string_cmp_str(cmd, "nimble_scan") == 0) {

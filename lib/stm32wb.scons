@@ -6,6 +6,8 @@ env.Append(
         "#/lib/stm32wb_cmsis/Include",
         "#/lib/stm32wb_hal/Inc",
         "#/lib/stm32wb_copro/wpan",
+        # stm32wbxx_hal_conf.h lives here, next to mbedtls_cfg.h
+        "#/lib",
     ],
     CPPDEFINES=[
         "STM32WB",
@@ -42,6 +44,10 @@ libenv.Append(
 libenv.ApplyLibFlags()
 
 sources = libenv.GlobRecursive("*_ll_*.c", "stm32wb_hal/Src/", exclude="*usb.c")
+# The one HAL driver this LL-only firmware builds: PKA has no LL API for
+# elliptic-curve scalar multiplication, and the NimBLE host needs P-256 for
+# Secure Connections (TASK-698). lib/stm32wbxx_hal_conf.h enables PKA alone.
+sources += [File("stm32wb_hal/Src/stm32wbxx_hal_pka.c")]
 sources += Glob(
     "stm32wb_copro/wpan/interface/patterns/ble_thread/shci/*.c",
     source=True,
