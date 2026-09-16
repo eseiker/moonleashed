@@ -63,6 +63,7 @@ static struct {
     volatile bool bonded;
     volatile uint32_t passkey;
     volatile uint16_t conn_handle;
+    volatile uint8_t conn_count;
     volatile uint32_t scan_count;
     uint8_t addr_type;
     uint8_t addr[6];
@@ -83,6 +84,17 @@ static FuriSemaphore* stop_sem;
 
 static void start_advertise(void);
 
+/* Re-arm connectable advertising when a peripheral slot is still free, so the
+ * Flipper can hold a second incoming link (companion + a separate CoC central,
+ * KNOW-623). No-op when already advertising or when all links are in use. The
+ * controller allows advertising while a peripheral connection is up (KNOW-618,
+ * supported-states bits 24/25). */
+static void maybe_advertise(void) {
+    if(glue.advertising) return;
+    if(glue.conn_count >= MYNEWT_VAL(BLE_MAX_CONNECTIONS)) return;
+    start_advertise();
+}
+
 static int gap_event(struct ble_gap_event* event, void* arg) {
     UNUSED(arg);
     switch(event->type) {
@@ -94,36 +106,56 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
     case BLE_GAP_EVENT_CONNECT:
         if(event->connect.status == 0) {
             glue.connected = true;
-            glue.advertising = false;
-            glue.bonded = false;
-            glue.pairing = false;
-            glue.conn_handle = event->connect.conn_handle;
-            if(nimble_mode_has_serial(glue.mode))
-                serial_gatt_set_conn(event->connect.conn_handle, true);
-            if(nimble_mode_has_hid(glue.mode))
-                hid_gatt_set_conn(event->connect.conn_handle, true);
-            FURI_LOG_I(TAG, "Central connected, handle %u", event->connect.conn_handle);
+            glue.advertising = false; /* the controller stops advertising on connect */
+            glue.conn_count++;
+            /* Bind the companion services (Serial/HID) to the FIRST peripheral
+             * link only. A second incoming link (e.g. a CoC-only central) must
+             * not clobber the companion's GATT connection. The CoC data path is
+             * bound per-channel by NimBLE, independent of glue.conn_handle. */
+            if(glue.conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+                glue.conn_handle = event->connect.conn_handle;
+                glue.bonded = false;
+                glue.pairing = false;
+                if(nimble_mode_has_serial(glue.mode))
+                    serial_gatt_set_conn(event->connect.conn_handle, true);
+                if(nimble_mode_has_hid(glue.mode))
+                    hid_gatt_set_conn(event->connect.conn_handle, true);
+            }
+            FURI_LOG_I(
+                TAG,
+                "Peripheral link up, handle %u (links=%u)",
+                event->connect.conn_handle,
+                glue.conn_count);
+            maybe_advertise(); /* keep a slot open for a second incoming link */
         } else {
             FURI_LOG_W(TAG, "Connect failed: %d", event->connect.status);
-            start_advertise();
+            maybe_advertise();
         }
         break;
 
-    case BLE_GAP_EVENT_DISCONNECT:
-        FURI_LOG_I(TAG, "Central disconnected, reason %d", event->disconnect.reason);
-        glue.connected = false;
-        glue.pairing = false;
-        glue.bonded = false;
-        glue.conn_handle = BLE_HS_CONN_HANDLE_NONE;
-        if(nimble_mode_has_serial(glue.mode)) serial_gatt_set_conn(0, false);
-        if(nimble_mode_has_hid(glue.mode)) hid_gatt_set_conn(0, false);
-        serial_store_save(); /* persist any CCCDs written during the connection */
-        start_advertise();
+    case BLE_GAP_EVENT_DISCONNECT: {
+        uint16_t h = event->disconnect.conn.conn_handle;
+        FURI_LOG_I(TAG, "Peripheral link down, handle %u reason %d", h, event->disconnect.reason);
+        if(glue.conn_count > 0) glue.conn_count--;
+        glue.connected = (glue.conn_count > 0);
+        if(h == glue.conn_handle) {
+            /* The companion link dropped: tear down its services and free the
+             * binding so the next first link can claim them. */
+            glue.pairing = false;
+            glue.bonded = false;
+            glue.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+            if(nimble_mode_has_serial(glue.mode)) serial_gatt_set_conn(0, false);
+            if(nimble_mode_has_hid(glue.mode)) hid_gatt_set_conn(0, false);
+            serial_store_save(); /* persist any CCCDs written during the connection */
+        }
+        maybe_advertise();
         break;
+    }
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
         FURI_LOG_I(TAG, "Advertising complete, restarting");
-        start_advertise();
+        glue.advertising = false;
+        maybe_advertise();
         break;
 
     case BLE_GAP_EVENT_NOTIFY_TX:
