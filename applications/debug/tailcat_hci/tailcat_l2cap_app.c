@@ -14,6 +14,7 @@
 #include <cli/cli_vcp.h>
 
 #include <furi_ble/l2cap_coc.h>
+#include <furi_ble/l2cap_fixed.h>
 #include <furi_ble/adv.h>
 #include <furi_ble/furi_ble_session.h>
 #include "l2cap_frame.h"
@@ -90,6 +91,20 @@ static void on_coc(BleL2capCocEvent* ev, void* context) {
     }
 }
 
+/* Inbound fixed-CID PDU (host thread). Frame it as [conn:2][cid:2][pdu...]. */
+static void on_fixed(uint16_t conn, uint16_t cid, const uint8_t* data, uint16_t len, void* context) {
+    L2App* app = context;
+    static uint8_t buf[4 + L2F_PAYLOAD_MAX];
+    if(len > L2F_PAYLOAD_MAX - 4) len = L2F_PAYLOAD_MAX - 4;
+    buf[0] = (uint8_t)conn;
+    buf[1] = (uint8_t)(conn >> 8);
+    buf[2] = (uint8_t)cid;
+    buf[3] = (uint8_t)(cid >> 8);
+    memcpy(buf + 4, data, len);
+    app->rx_sdus++;
+    l2_emit(app, L2F_FIXED_DATA, buf, len + 4);
+}
+
 static void l2_handle_frame(L2App* app, const L2Frame* f) {
     switch(f->type) {
     case L2F_LISTEN:
@@ -110,6 +125,34 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
                 l2_emit(app, L2F_ERROR, code, sizeof(code));
             }
         }
+        break;
+    case L2F_FIXED_REGISTER:
+        /* [cid:2][mtu:2]: relay a fixed L2CAP CID (e.g. 0x003A). */
+        if(f->len >= 4) {
+            uint16_t cid = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+            uint16_t mtu = (uint16_t)f->data[2] | ((uint16_t)f->data[3] << 8);
+            if(!ble_l2cap_fixed_register(cid, mtu)) {
+                uint8_t code[2] = {0x06, 0x00}; /* fixed-CID register refused */
+                l2_emit(app, L2F_ERROR, code, sizeof(code));
+            }
+        }
+        break;
+    case L2F_FIXED_SEND:
+        /* [conn:2][cid:2][pdu...]: transmit a raw PDU on a fixed CID. */
+        if(f->len >= 4) {
+            uint16_t conn = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+            uint16_t cid = (uint16_t)f->data[2] | ((uint16_t)f->data[3] << 8);
+            if(ble_l2cap_fixed_send(conn, cid, f->data + 4, f->len - 4)) {
+                app->tx_sdus++;
+            } else {
+                uint8_t code[2] = {0x07, 0x00}; /* fixed-CID send failed */
+                l2_emit(app, L2F_ERROR, code, sizeof(code));
+            }
+        }
+        break;
+    case L2F_FIXED_UNREG:
+        if(f->len >= 2)
+            ble_l2cap_fixed_unregister((uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8));
         break;
     case L2F_CLOSE:
         if(f->len >= 1) ble_l2cap_coc_disconnect(f->data[0]);
@@ -297,6 +340,8 @@ int32_t tailcat_l2cap_app(void* context) {
     /* Use the resident host's CoC API — no raw HCI, no controller acquire. */
     ble_l2cap_coc_init();
     ble_l2cap_coc_set_callback(0, on_coc, app);
+    ble_l2cap_fixed_init();
+    ble_l2cap_fixed_set_callback(on_fixed, app);
 
     Gui* gui = furi_record_open(RECORD_GUI);
     ViewPort* viewport = view_port_alloc();
@@ -344,6 +389,8 @@ int32_t tailcat_l2cap_app(void* context) {
         app->central = NULL;
     }
     furi_ble_adv_clear(); /* restore the companion advertisement */
+    ble_l2cap_fixed_set_callback(NULL, NULL);
+    ble_l2cap_fixed_deinit();
     ble_l2cap_coc_set_callback(0, NULL, NULL);
     ble_l2cap_coc_deinit();
 

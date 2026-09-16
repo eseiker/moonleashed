@@ -28,6 +28,13 @@ _Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must
 #define L2F_CONNECT    0x04 /* [psm:2][name...]            central: scan+connect, then CoC client on psm */
 #define L2F_ADVERTISE  0x05 /* [adv_len:1][adv...][rsp...] install raw advertisement */
 
+/* Fixed L2CAP CID relay (TASK-663), a separate family from the CoC frames so
+ * their numbering is untouched. These carry a raw L2CAP CID and a connection
+ * handle rather than a CoC channel index. */
+#define L2F_FIXED_REGISTER 0x10 /* [cid:2][mtu:2]                   relay a fixed CID */
+#define L2F_FIXED_SEND     0x11 /* [conn:2][cid:2][pdu...]          transmit a PDU    */
+#define L2F_FIXED_UNREG    0x12 /* [cid:2]                          stop relaying     */
+
 /* FAP -> Host */
 #define L2F_CONNECTED    0x81 /* [channel:1][conn:2][peer_mtu:2] — peer_mtu is the
                                 * peer's CoC SDU MTU; cap SENDs at min(peer_mtu,
@@ -36,6 +43,7 @@ _Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must
 #define L2F_DATA         0x82 /* [channel:1][data...] */
 #define L2F_DISCONNECTED 0x83 /* [channel:1]          */
 #define L2F_ERROR        0x84 /* [code:2]             */
+#define L2F_FIXED_DATA   0x90 /* [conn:2][cid:2][pdu...] inbound fixed-CID PDU */
 
 typedef struct {
     uint8_t type;
