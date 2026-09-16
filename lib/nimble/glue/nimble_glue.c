@@ -36,11 +36,14 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
+#include "os/os_mbuf.h"
+
 #include "nimble_glue.h"
 #include "serial_gatt.h"
 #include "serial_store.h"
 #include "hid_gatt.h"
 #include "coc_glue.h"
+#include "gattc_glue.h"
 
 #define TAG "NimbleGlue"
 
@@ -628,6 +631,19 @@ static int dct_gap_event(struct ble_gap_event* event, void* arg) {
         FURI_LOG_I(TAG, "DCT central link down, reason %d", event->disconnect.reason);
         dct_finish();
         return 0;
+
+    case BLE_GAP_EVENT_NOTIFY_RX: {
+        /* Forward notifications/indications on the central link to the GATT
+         * client core so ble_gatt_client_* subscribers receive them. */
+        static uint8_t nbuf[512];
+        uint16_t len = OS_MBUF_PKTLEN(event->notify_rx.om);
+        if(len > sizeof(nbuf)) len = sizeof(nbuf);
+        if(len && os_mbuf_copydata(event->notify_rx.om, 0, len, nbuf) == 0) {
+            gattc_api_on_notify(
+                event->notify_rx.conn_handle, event->notify_rx.attr_handle, nbuf, len);
+        }
+        return 0;
+    }
 
     default:
         return 0;

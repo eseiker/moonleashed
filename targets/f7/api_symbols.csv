@@ -1,5 +1,5 @@
 entry,status,name,type,params
-Version,+,88.12,,
+Version,+,88.13,,
 Header,+,applications/drivers/subghz/cc1101_ext/cc1101_ext_interconnect.h,,
 Header,+,applications/services/applications.h,,
 Header,+,applications/services/bt/bt_service/bt.h,,
@@ -286,6 +286,7 @@ Header,+,lib/toolbox/version.h,,
 Header,+,lib/u8g2/u8g2_glue.h,,
 Header,+,targets/f7/ble_glue/furi_ble/event_dispatcher.h,,
 Header,+,targets/f7/ble_glue/furi_ble/gatt.h,,
+Header,+,targets/f7/ble_glue/furi_ble/gatt_client.h,,
 Header,+,targets/f7/ble_glue/furi_ble/l2cap_coc.h,,
 Header,+,targets/f7/ble_glue/furi_ble/profile_interface.h,,
 Header,+,targets/f7/ble_glue/profiles/serial_profile.h,,
@@ -813,6 +814,15 @@ Function,+,ble_event_dispatcher_unregister_svc_handler,void,GapSvcEventHandler*
 Function,+,ble_gatt_characteristic_delete,void,"uint16_t, BleGattCharacteristicInstance*"
 Function,+,ble_gatt_characteristic_init,void,"uint16_t, const BleGattCharacteristicParams*, BleGattCharacteristicInstance*"
 Function,+,ble_gatt_characteristic_update,_Bool,"uint16_t, BleGattCharacteristicInstance*, const void*"
+Function,+,ble_gatt_client_deinit,void,
+Function,+,ble_gatt_client_discover_characteristics,_Bool,"uint16_t, const BleGattService*"
+Function,+,ble_gatt_client_discover_services,_Bool,uint16_t
+Function,+,ble_gatt_client_exchange_mtu,_Bool,uint16_t
+Function,+,ble_gatt_client_init,void,
+Function,+,ble_gatt_client_read,_Bool,"uint16_t, uint16_t"
+Function,+,ble_gatt_client_set_callback,void,"uint16_t, BleGattClientCallback, void*"
+Function,+,ble_gatt_client_subscribe_notifications,_Bool,"uint16_t, uint16_t, _Bool"
+Function,+,ble_gatt_client_write,_Bool,"uint16_t, uint16_t, const uint8_t*, uint16_t"
 Function,+,ble_gatt_service_add,_Bool,"uint8_t, const Service_UUID_t*, uint8_t, uint8_t, uint16_t*"
 Function,+,ble_gatt_service_delete,_Bool,uint16_t
 Function,+,ble_glue_force_c2_mode,BleGlueCommandResult,BleGlueC2Mode
