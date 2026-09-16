@@ -213,12 +213,54 @@ static void bt_cli_command_nimble_scan(PipeSide* pipe, FuriString* args, void* c
     printf("Scan stopped. total reports=%lu. Companion restored.\r\n", nimble_glue_scan_count());
 }
 
+/* Modal DCT central session (TASK-615, Milestone 2). Suspends the companion,
+ * scans for a peer advertising "FlipperDCT", connects as central, and opens an
+ * L2CAP CoC as the client on the given PSM. */
+static void bt_cli_command_nimble_coc(PipeSide* pipe, FuriString* args, void* context) {
+    UNUSED(context);
+
+    int psm = 0;
+    if(!args_read_int_and_trim(args, &psm) || psm <= 0 || psm > 0xFFFF) {
+        printf("Usage: bt nimble_coc <psm>\r\n");
+        printf("  <psm> is the peer's CoC PSM (decimal), printed by the Mac DCT server.\r\n");
+        return;
+    }
+    if(!nimble_glue_is_synced()) {
+        printf("NimBLE host not active (stock BT stack in use).\r\n");
+        return;
+    }
+    if(!nimble_glue_dct_connect((uint16_t)psm)) {
+        printf("DCT start failed (already active, or host not synced).\r\n");
+        return;
+    }
+    printf("DCT session: companion suspended, scanning for 'FlipperDCT', PSM %d.\r\n", psm);
+    printf("Press CTRL+C to stop and restore the companion.\r\n");
+
+    uint32_t last = 0;
+    while(!cli_is_pipe_broken_or_is_etx_next_char(pipe)) {
+        furi_delay_ms(250);
+        uint32_t rx = nimble_glue_dct_rx_bytes();
+        if(rx != last) {
+            printf("CoC rx=%lu bytes\r\n", rx);
+            last = rx;
+        }
+        if(!nimble_glue_dct_is_active()) {
+            printf("DCT session ended (peer dropped or connect failed).\r\n");
+            break;
+        }
+    }
+
+    nimble_glue_dct_stop();
+    printf("DCT stopped. rx=%lu bytes. Companion restored.\r\n", nimble_glue_dct_rx_bytes());
+}
+
 static void bt_cli_print_usage(void) {
     printf("Usage:\r\n");
     printf("bt <cmd> <args>\r\n");
     printf("Cmd list:\r\n");
     printf("\thci_info\t - HCI info\r\n");
     printf("\tnimble_scan\t - NimBLE central scan probe (suspends companion)\r\n");
+    printf("\tnimble_coc <psm>\t - NimBLE modal DCT: connect to 'FlipperDCT' + CoC\r\n");
     if(furi_hal_rtc_is_flag_set(FuriHalRtcFlagDebug) && furi_hal_bt_is_testing_supported()) {
         printf("\ttx_carrier <channel:0-39> <power:0-6>\t - start tx carrier test\r\n");
         printf("\trx_carrier <channel:0-39>\t - start rx carrier test\r\n");
@@ -248,6 +290,10 @@ static void bt_cli(PipeSide* pipe, FuriString* args, void* context) {
         }
         if(furi_string_cmp_str(cmd, "nimble_scan") == 0) {
             bt_cli_command_nimble_scan(pipe, args, NULL);
+            break;
+        }
+        if(furi_string_cmp_str(cmd, "nimble_coc") == 0) {
+            bt_cli_command_nimble_coc(pipe, args, NULL);
             break;
         }
         if(furi_hal_rtc_is_flag_set(FuriHalRtcFlagDebug) && furi_hal_bt_is_testing_supported()) {

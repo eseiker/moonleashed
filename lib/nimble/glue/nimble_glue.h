@@ -73,6 +73,18 @@ bool nimble_glue_is_scanning(void);
 bool nimble_glue_central_probe_start(void);
 void nimble_glue_central_probe_stop(void);
 
+/* Modal DCT central session (TASK-615, Milestone 2). Suspends the companion,
+ * scans for a peer advertising the name "FlipperDCT", connects to it as central,
+ * and opens an L2CAP CoC as the client on the given PSM. On CoC connect the
+ * Flipper sends an opening payload; received bytes are counted
+ * (nimble_glue_dct_rx_bytes). When the link drops (or nimble_glue_dct_stop is
+ * called) the companion is restored. Returns false if not synced or a session is
+ * already active. This is the Flipper-as-central time-share path (KNOW-626). */
+bool nimble_glue_dct_connect(uint16_t psm);
+void nimble_glue_dct_stop(void);
+bool nimble_glue_dct_is_active(void);
+uint32_t nimble_glue_dct_rx_bytes(void);
+
 /* True while legacy pairing is in progress (passkey shown, awaiting the phone). */
 bool nimble_glue_is_pairing(void);
 

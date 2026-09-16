@@ -69,6 +69,7 @@ void coc_probe_capabilities(void) {
 static struct {
     struct ble_l2cap_chan* chan;
     volatile bool connected;
+    volatile bool is_client; /* true when the Flipper opened the CoC (central/DCT) */
     volatile uint16_t conn_handle;
     volatile uint32_t rx_bytes;
 } coc;
@@ -119,9 +120,23 @@ static int coc_l2cap_event(struct ble_l2cap_event* event, void* arg) {
         coc.rx_bytes = 0;
         FURI_LOG_I(
             TAG,
-            "CoC connected status=%d handle=%u",
+            "CoC connected status=%d handle=%u client=%d",
             event->connect.status,
-            event->connect.conn_handle);
+            event->connect.conn_handle,
+            (int)coc.is_client);
+        /* When the Flipper is the client (central/DCT), send an opening payload
+         * so the round trip is observable from this side. */
+        if(coc.is_client && event->connect.status == 0) {
+            static const char hello[] = "flipper-dct-hello";
+            struct os_mbuf* tx = os_msys_get_pkthdr(sizeof(hello) - 1, 0);
+            if(tx && os_mbuf_append(tx, hello, sizeof(hello) - 1) == 0) {
+                int rc = ble_l2cap_send(event->connect.chan, tx);
+                if(rc != 0 && rc != BLE_HS_ESTALLED) os_mbuf_free_chain(tx);
+                FURI_LOG_I(TAG, "CoC client sent hello rc=%d", rc);
+            } else if(tx) {
+                os_mbuf_free_chain(tx);
+            }
+        }
         return 0;
 
     case BLE_L2CAP_EVENT_COC_DISCONNECTED:
@@ -134,7 +149,13 @@ static int coc_l2cap_event(struct ble_l2cap_event* event, void* arg) {
         struct os_mbuf* sdu_rx = event->receive.sdu_rx;
         uint16_t len = OS_MBUF_PKTLEN(sdu_rx);
         coc.rx_bytes += len;
-        coc_echo(event->receive.chan, sdu_rx);
+        /* Server (companion peripheral) echoes back. Client (central/DCT) just
+         * consumes — echoing the server's echo would ping-pong forever. */
+        if(coc.is_client) {
+            FURI_LOG_I(TAG, "CoC client rx %u bytes (total %lu)", len, coc.rx_bytes);
+        } else {
+            coc_echo(event->receive.chan, sdu_rx);
+        }
         /* Re-arm reception with a fresh buffer, then free the received one. */
         struct os_mbuf* next = coc_sdu_alloc();
         if(next) ble_l2cap_recv_ready(event->receive.chan, next);
@@ -154,6 +175,19 @@ int coc_server_start(void) {
     memset(&coc, 0, sizeof(coc));
     int rc = ble_l2cap_create_server(COC_TEST_PSM, COC_MTU, coc_l2cap_event, NULL);
     FURI_LOG_I(TAG, "CoC echo server on PSM 0x%04X rc=%d", COC_TEST_PSM, rc);
+    return rc;
+}
+
+int coc_client_connect(uint16_t conn_handle, uint16_t psm) {
+    memset(&coc, 0, sizeof(coc));
+    coc.is_client = true;
+    /* ble_l2cap_connect takes ownership of sdu_rx; it is freed here only if the
+     * call fails synchronously. */
+    struct os_mbuf* sdu_rx = coc_sdu_alloc();
+    if(!sdu_rx) return BLE_HS_ENOMEM;
+    int rc = ble_l2cap_connect(conn_handle, psm, COC_MTU, sdu_rx, coc_l2cap_event, NULL);
+    FURI_LOG_I(TAG, "CoC client connect handle=%u PSM 0x%04X rc=%d", conn_handle, psm, rc);
+    if(rc != 0) os_mbuf_free_chain(sdu_rx);
     return rc;
 }
 

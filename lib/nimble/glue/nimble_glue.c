@@ -86,6 +86,23 @@ static FuriSemaphore* stop_sem;
 static void start_advertise(void);
 static void start_scan(void);
 
+/* Modal DCT central session (TASK-615, Milestone 2). Peer discovered by name. */
+#define DCT_PEER_NAME "FlipperDCT"
+#define DCT_IDLE       0
+#define DCT_SCANNING   1
+#define DCT_CONNECTING 2
+#define DCT_RUNNING    3
+static struct {
+    volatile bool active;
+    volatile int state;
+    uint8_t peer[6];
+    uint8_t peer_type;
+    uint16_t psm;
+    uint16_t conn_handle;
+} dct;
+static int dct_gap_event(struct ble_gap_event* event, void* arg);
+static void dct_finish(void);
+
 /* Re-arm connectable advertising when a peripheral slot is still free, so the
  * Flipper can hold a second incoming link (companion + a separate CoC central,
  * KNOW-623). No-op when already advertising or when all links are in use. The
@@ -116,6 +133,26 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             event->disc.addr.val[0],
             event->disc.addr.type,
             event->disc.rssi);
+        /* During a modal DCT session, match the peer by advertised name, then
+         * stop scanning and connect to it as central. */
+        if(dct.active && dct.state == DCT_SCANNING) {
+            struct ble_hs_adv_fields f;
+            if(ble_hs_adv_parse_fields(&f, event->disc.data, event->disc.length_data) == 0 &&
+               f.name != NULL && f.name_len == strlen(DCT_PEER_NAME) &&
+               memcmp(f.name, DCT_PEER_NAME, f.name_len) == 0) {
+                memcpy(dct.peer, event->disc.addr.val, 6);
+                dct.peer_type = event->disc.addr.type;
+                dct.state = DCT_CONNECTING;
+                glue.scanning = false;
+                ble_gap_disc_cancel();
+                ble_addr_t peer = {.type = dct.peer_type};
+                memcpy(peer.val, dct.peer, 6);
+                int rc = ble_gap_connect(
+                    glue.addr_type, &peer, 5000, NULL, dct_gap_event, NULL);
+                FURI_LOG_I(TAG, "DCT peer '%s' found, central connect rc=%d", DCT_PEER_NAME, rc);
+                if(rc != 0) dct_finish();
+            }
+        }
         break;
 
     case BLE_GAP_EVENT_DISC_COMPLETE:
@@ -549,6 +586,96 @@ void nimble_glue_central_probe_stop(void) {
     }
     glue.central_probe = false;
     maybe_advertise(); /* restore the companion */
+}
+
+/* End the modal DCT session and restore the companion. */
+static void dct_finish(void) {
+    dct.active = false;
+    dct.state = DCT_IDLE;
+    dct.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    glue.central_probe = false; /* let the companion advertise again */
+    glue.scanning = false;
+    maybe_advertise();
+    FURI_LOG_I(TAG, "DCT session ended, companion restored");
+}
+
+/* GAP events for the modal DCT central link. Kept separate from gap_event so the
+ * central connection never binds the companion Serial/HID services. */
+static int dct_gap_event(struct ble_gap_event* event, void* arg) {
+    UNUSED(arg);
+    switch(event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if(event->connect.status == 0) {
+            dct.conn_handle = event->connect.conn_handle;
+            dct.state = DCT_RUNNING;
+            FURI_LOG_I(
+                TAG,
+                "DCT central link up handle=%u, opening CoC PSM 0x%04X",
+                dct.conn_handle,
+                dct.psm);
+            int rc = coc_client_connect(dct.conn_handle, dct.psm);
+            if(rc != 0) {
+                FURI_LOG_E(TAG, "coc_client_connect rc=%d", rc);
+                ble_gap_terminate(dct.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            }
+        } else {
+            FURI_LOG_W(TAG, "DCT central connect failed: %d", event->connect.status);
+            dct_finish();
+        }
+        return 0;
+
+    case BLE_GAP_EVENT_DISCONNECT:
+        FURI_LOG_I(TAG, "DCT central link down, reason %d", event->disconnect.reason);
+        dct_finish();
+        return 0;
+
+    default:
+        return 0;
+    }
+}
+
+bool nimble_glue_dct_connect(uint16_t psm) {
+    if(!glue.synced || dct.active) return false;
+    memset(&dct, 0, sizeof(dct));
+    dct.active = true;
+    dct.state = DCT_SCANNING;
+    dct.psm = psm;
+    dct.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    /* Suspend the companion; the scan starts from the DISCONNECT handler once the
+     * last peripheral link is gone (or immediately if nothing is connected). */
+    glue.central_probe = true;
+    glue.scan_count = 0;
+    if(glue.advertising) {
+        ble_gap_adv_stop();
+        glue.advertising = false;
+    }
+    if(glue.conn_count > 0 && glue.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        ble_gap_terminate(glue.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    }
+    if(glue.conn_count == 0) {
+        start_scan();
+    }
+    FURI_LOG_I(TAG, "DCT session started, scanning for '%s' PSM 0x%04X", DCT_PEER_NAME, psm);
+    return true;
+}
+
+void nimble_glue_dct_stop(void) {
+    if(!dct.active) return;
+    if(dct.state == DCT_RUNNING && dct.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        /* Drop the central link; dct_gap_event's DISCONNECT runs dct_finish. */
+        ble_gap_terminate(dct.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    } else {
+        if(glue.scanning) ble_gap_disc_cancel();
+        dct_finish();
+    }
+}
+
+bool nimble_glue_dct_is_active(void) {
+    return dct.active;
+}
+
+uint32_t nimble_glue_dct_rx_bytes(void) {
+    return coc_rx_bytes();
 }
 
 bool nimble_glue_is_connected(void) {

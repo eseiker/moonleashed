@@ -25,6 +25,12 @@ void coc_probe_capabilities(void);
  * success. Proves NimBLE CoC on the HCILayer radio before the DCT logic lands. */
 int coc_server_start(void);
 
+/* Open an L2CAP CoC as the client on an already-established central link
+ * (TASK-615, Milestone 2 / DCT). conn_handle is the central connection; psm is
+ * the peer's CoC PSM. On connect the Flipper sends an opening payload so the
+ * round trip is observable. Returns 0 on success. */
+int coc_client_connect(uint16_t conn_handle, uint16_t psm);
+
 /* True while a peer has an open CoC channel. */
 bool coc_is_connected(void);
 
