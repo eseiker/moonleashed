@@ -3,9 +3,23 @@ App(
     name="Tailcat HCI Bridge",
     apptype=FlipperAppType.EXTERNAL,
     entry_point="tailcat_hci_app",
+    sources=["tailcat_hci_app.c"],
     requires=["gui"],
     stack_size=4096,
     fap_category="Tools",
     fap_version=(0, 3),
     fap_description="USB CDC H4 bridge using the STM32WB BLE HCILayer stack",
+)
+
+App(
+    appid="tailcat_l2cap",
+    name="Tailcat L2CAP Bridge",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="tailcat_l2cap_app",
+    sources=["tailcat_l2cap_app.c"],
+    requires=["gui"],
+    stack_size=4096,
+    fap_category="Tools",
+    fap_version=(0, 1),
+    fap_description="USB CDC bridge for L2CAP CoC on the resident NimBLE host",
 )
