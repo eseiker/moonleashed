@@ -157,6 +157,34 @@ bool sm_glue_sc_supported(void) {
     return MYNEWT_VAL(BLE_SM_SC) != 0;
 }
 
+#if !MYNEWT_VAL(BLE_SM_SC)
+
+/* Secure Connections is not built: the SC symbols do not exist, so the OOB
+ * calls report failure instead of referencing them. sm_glue_sc_supported tells
+ * a caller this ahead of time. */
+static bool oob_inject(uint16_t conn_handle) {
+    UNUSED(conn_handle);
+    return false;
+}
+
+bool sm_glue_oob_generate(uint8_t* out_random, uint8_t* out_confirm) {
+    UNUSED(out_random);
+    UNUSED(out_confirm);
+    FURI_LOG_E(TAG, "OOB needs Secure Connections, which is not built in");
+    return false;
+}
+
+bool sm_glue_oob_set_peer(const uint8_t* random, const uint8_t* confirm) {
+    UNUSED(random);
+    UNUSED(confirm);
+    return false;
+}
+
+void sm_glue_oob_clear(void) {
+}
+
+#else
+
 static bool oob_inject(uint16_t conn_handle) {
     struct ble_sm_io io = {0};
     io.action = BLE_SM_IOACT_OOB_SC;
@@ -207,6 +235,8 @@ void sm_glue_oob_clear(void) {
     memset(&s_oob_remote, 0, sizeof(s_oob_remote));
     ble_hs_cfg.sm_oob_data_flag = 0;
 }
+
+#endif /* MYNEWT_VAL(BLE_SM_SC) */
 
 bool sm_glue_on_passkey_action(uint16_t conn_handle, uint8_t action, uint32_t numcmp) {
     if(!s_cb) return false;
