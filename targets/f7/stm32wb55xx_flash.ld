@@ -5,8 +5,23 @@ _stack_end = 0x20030000;    /* end of RAM */
 /* Generate a link error if heap and stack don't fit into RAM */
 _stack_size = 0x400; /* required amount of stack */
 
+/* Base of the CPU2 radio firmware, and the ceiling for everything CPU1 owns.
+ * The hard limit at runtime is the SFSA option byte, which FUS sets from the
+ * installed stack; furi_hal_flash_get_free_end_address reads SFSA directly, so
+ * internal storage is already correct. This constant only exists so the link
+ * fails when the image itself would reach the radio, which a FLASH region of
+ * the full 1024K never catches.
+ *
+ * 0x080E0000 is where the BLE HCILayer stack loads, which is what this fork
+ * runs. A stock BLE Stack light device would be 0x080D7000 instead.
+ * scripts/flipper/assets/coprobin.py prints the address for any stack. */
+__radio_base__ = 0x080E0000;
+
 MEMORY {
-    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 1024K
+    /* 896K, not the full 1024K: the region stops at __radio_base__. An image
+     * that would reach the radio then overflows the region at link time, and
+     * the free space reported after a build is what CPU1 can really use. */
+    FLASH (rx)  : ORIGIN = 0x08000000, LENGTH = 896K
     RAM1  (xrw) : ORIGIN = 0x20000008, LENGTH = 0x2FFF8
     RAM2A (xrw) : ORIGIN = 0x20030000, LENGTH = 10K
     RAM2B (xrw) : ORIGIN = 0x20038000, LENGTH = 10K
@@ -111,7 +126,9 @@ SECTIONS {
         . = ALIGN(8);
     } >RAM1
 
-    /* Free Flash space, that can be used for internal storage */
+    /* Free Flash space, that can be used for internal storage. It stops at the
+     * radio rather than the end of flash, so the size reported after a build is
+     * what CPU1 can really still use. */
     .free_flash(DSECT) : {
         __free_flash_start__ = .;
         . = ORIGIN(FLASH) + LENGTH(FLASH);
@@ -183,3 +200,8 @@ SECTIONS {
     .note.gnu.arm.ident 0 : { KEEP (*(.note.gnu.arm.ident)) }
     /DISCARD/ : { *(.note.GNU-stack) *(.gnu_debuglink) *(.gnu.lto_*) }
 }
+
+ASSERT(
+    __free_flash_start__ <= __radio_base__,
+    "Firmware image reaches the CPU2 radio at __radio_base__ (0x080E0000). Shrink the image; flashing it would corrupt the radio."
+)
