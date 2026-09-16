@@ -1,0 +1,11 @@
+App(
+    appid="ble_gatt_echo",
+    name="BLE GATT Echo",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="ble_gatt_echo_app",
+    requires=["gui", "bt"],
+    stack_size=2048,
+    fap_category="Debug",
+    fap_version=(0, 1),
+    fap_description="Custom GATT service via the stock ble_gatt_* API (RX write -> TX notify echo)",
+)
