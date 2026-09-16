@@ -130,9 +130,16 @@ int32_t tailcat_hci_app(void* context) {
     gui_add_view_port(gui, viewport, GuiLayerFullscreen);
     CliVcp* cli = furi_record_open(RECORD_CLI_VCP);
     FuriHalUsbInterface* previous = furi_hal_usb_get_config();
-    furi_hal_usb_unlock();
-    if(furi_hal_usb_set_config(&usb_cdc_dual, NULL)) {
-        cli_vcp_enable(cli);
+    /* Firmware that already runs two CDC ports by default: just claim
+     * interface 1, no USB re-enumeration. Older firmware: switch as before. */
+    bool reconfigure = previous != &usb_cdc_dual;
+    bool usb_ok = true;
+    if(reconfigure) {
+        furi_hal_usb_unlock();
+        usb_ok = furi_hal_usb_set_config(&usb_cdc_dual, NULL);
+        if(usb_ok) cli_vcp_enable(cli);
+    }
+    if(usb_ok) {
         furi_hal_cdc_set_callbacks(1, &usb_callbacks, app);
         furi_thread_start(app->worker);
         InputEvent key;
@@ -147,9 +154,11 @@ int32_t tailcat_hci_app(void* context) {
         app->stop = true;
         furi_thread_join(app->worker);
         furi_hal_cdc_set_callbacks(1, NULL, NULL);
-        cli_vcp_disable(cli);
-        furi_hal_usb_set_config(previous, NULL);
-        cli_vcp_enable(cli);
+        if(reconfigure) {
+            cli_vcp_disable(cli);
+            furi_hal_usb_set_config(previous, NULL);
+            cli_vcp_enable(cli);
+        }
     }
     bool reset_ok = furi_hal_bt_hci_release();
     gui_remove_view_port(gui, viewport);

@@ -305,7 +305,8 @@ static int32_t usb_uart_worker(void* context) {
     furi_semaphore_free(usb_uart->tx_sem);
 
     furi_hal_usb_unlock();
-    furi_check(furi_hal_usb_set_config(&usb_cdc_single, NULL) == true);
+    /* Restore the firmware's default USB mode (two CDC ports, CLI on 0). */
+    furi_check(furi_hal_usb_set_config(&usb_cdc_dual, NULL) == true);
     cli_vcp_enable(usb_uart->cli_vcp);
 
     furi_record_close(RECORD_CLI_VCP);
