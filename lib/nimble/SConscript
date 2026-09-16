@@ -37,6 +37,15 @@ libenv.AppendUnique(
     # does not trip on upstream NimBLE style. Mirrors the old fap cflags=["-w"].
     # Appended after ApplyLibFlags so -w wins over -Werror on the command line.
     CCFLAGS=["-w"],
+    # NimBLE's internal L2CAP CoC uses two symbol names that clash with the
+    # Moon-Firmware-compatible public API (ble_l2cap_coc_init / _send) we expose
+    # from targets/f7/ble_glue/furi_ble/l2cap_coc.c (KNOW-636). Rename the NimBLE
+    # internals across the whole vendored lib so the public names are free; only
+    # these two overlap, and nothing outside this lib calls the NimBLE internals.
+    CPPDEFINES=[
+        ("ble_l2cap_coc_init", "nmbl_l2cap_coc_init"),
+        ("ble_l2cap_coc_send", "nmbl_l2cap_coc_send"),
+    ],
 )
 
 sources = libenv.GlobRecursive("*.c")

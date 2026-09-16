@@ -37,4 +37,60 @@ bool coc_is_connected(void);
 /* Bytes received on the CoC since it connected. */
 uint32_t coc_rx_bytes(void);
 
+/* --- Neutral multi-channel CoC core (TASK-621) ----------------------------- *
+ *
+ * A transport-neutral, plain-C L2CAP CoC manager the firmware furi_ble layer
+ * builds the Moon-Firmware-compatible ble_l2cap_coc_* API on (KNOW-636). It owns
+ * the NimBLE channels, assigns a small uint8_t channel index to each, and reports
+ * events through one registered dispatcher. It is independent of the echo/DCT
+ * test helpers above; both can run at once on different PSMs.
+ *
+ * These functions are safe to include from the firmware (no NimBLE types leak
+ * through this header).
+ */
+
+typedef enum {
+    CocApiConnected, /* a channel opened: index + conn_handle + peer_mtu valid */
+    CocApiDisconnected, /* a channel closed: index + conn_handle valid */
+    CocApiData, /* SDU received: index + conn_handle + data/data_len valid */
+    CocApiTxUnstalled, /* a stalled send can resume: index + conn_handle valid */
+    CocApiError, /* connect failed: conn_handle + error_code valid */
+} CocApiEventType;
+
+typedef struct {
+    CocApiEventType type;
+    uint8_t channel_index;
+    uint16_t conn_handle;
+    const uint8_t* data; /* CocApiData only; valid only during the callback */
+    uint16_t data_len;
+    uint16_t peer_mtu; /* CocApiConnected only */
+    uint16_t error_code; /* CocApiError only */
+} CocApiEvent;
+
+typedef void (*CocApiCallback)(const CocApiEvent* event, void* context);
+
+/* Initialize the core and set the single event dispatcher (idempotent). */
+void coc_api_init(CocApiCallback dispatch, void* context);
+
+/* Tear the core down: close nothing on the controller, just drop state. */
+void coc_api_deinit(void);
+
+/* Listen for incoming CoC connections on a PSM (server role). Incoming channels
+ * are auto-accepted and reported as CocApiConnected. Returns true on success. */
+bool coc_api_listen(uint16_t psm, uint16_t mtu);
+
+/* Open a CoC as the client on an established link (central/DCT). Returns true if
+ * the request was issued; CocApiConnected or CocApiError follows. */
+bool coc_api_connect(uint16_t conn_handle, uint16_t psm, uint16_t mtu);
+
+/* Send data on a channel. Returns true if sent or queued. */
+bool coc_api_send(uint8_t channel_index, const uint8_t* data, uint16_t len);
+
+/* Re-arm reception on a channel, replenishing the peer's credits (flow control).
+ * Reception is auto-re-armed after each CocApiData, so this is usually optional. */
+bool coc_api_grant(uint8_t channel_index);
+
+/* Disconnect a channel. Returns true if the request was issued. */
+bool coc_api_disconnect(uint8_t channel_index);
+
 #endif /* COC_GLUE_H_ */

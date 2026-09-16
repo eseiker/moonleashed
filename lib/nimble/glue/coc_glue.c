@@ -198,3 +198,198 @@ bool coc_is_connected(void) {
 uint32_t coc_rx_bytes(void) {
     return coc.rx_bytes;
 }
+
+/* ---- Neutral multi-channel CoC core (TASK-621) ---------------------------- */
+
+#define COC_API_MAX_CHAN 4
+
+static struct {
+    bool in_use;
+    struct ble_l2cap_chan* chan;
+    uint16_t conn_handle;
+} coc_api_chans[COC_API_MAX_CHAN];
+
+static CocApiCallback coc_api_cb;
+static void* coc_api_ctx;
+static uint8_t coc_api_rxbuf[1024];
+
+static int coc_api_alloc_index(struct ble_l2cap_chan* chan, uint16_t conn_handle) {
+    for(int i = 0; i < COC_API_MAX_CHAN; i++) {
+        if(coc_api_chans[i].in_use && coc_api_chans[i].chan == chan) return i;
+    }
+    for(int i = 0; i < COC_API_MAX_CHAN; i++) {
+        if(!coc_api_chans[i].in_use) {
+            coc_api_chans[i].in_use = true;
+            coc_api_chans[i].chan = chan;
+            coc_api_chans[i].conn_handle = conn_handle;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static int coc_api_index_of(struct ble_l2cap_chan* chan) {
+    for(int i = 0; i < COC_API_MAX_CHAN; i++) {
+        if(coc_api_chans[i].in_use && coc_api_chans[i].chan == chan) return i;
+    }
+    return -1;
+}
+
+static struct ble_l2cap_chan* coc_api_chan_at(uint8_t index) {
+    if(index >= COC_API_MAX_CHAN || !coc_api_chans[index].in_use) return NULL;
+    return coc_api_chans[index].chan;
+}
+
+static void coc_api_emit(const CocApiEvent* ev) {
+    if(coc_api_cb) coc_api_cb(ev, coc_api_ctx);
+}
+
+static struct os_mbuf* coc_api_sdu(void) {
+    return os_msys_get_pkthdr(sizeof(coc_api_rxbuf), 0);
+}
+
+static int coc_api_l2cap_event(struct ble_l2cap_event* event, void* arg) {
+    UNUSED(arg);
+    switch(event->type) {
+    case BLE_L2CAP_EVENT_COC_ACCEPT: {
+        /* Auto-accept an incoming channel by handing the stack a rx buffer. */
+        struct os_mbuf* sdu = coc_api_sdu();
+        if(!sdu) return BLE_HS_ENOMEM;
+        ble_l2cap_recv_ready(event->accept.chan, sdu);
+        return 0;
+    }
+
+    case BLE_L2CAP_EVENT_COC_CONNECTED: {
+        if(event->connect.status != 0) {
+            CocApiEvent ev = {
+                .type = CocApiError,
+                .conn_handle = event->connect.conn_handle,
+                .error_code = (uint16_t)event->connect.status};
+            coc_api_emit(&ev);
+            return 0;
+        }
+        int idx = coc_api_alloc_index(event->connect.chan, event->connect.conn_handle);
+        if(idx < 0) {
+            FURI_LOG_E(TAG, "coc_api: no free channel slot");
+            ble_l2cap_disconnect(event->connect.chan);
+            return 0;
+        }
+        struct ble_l2cap_chan_info info;
+        uint16_t peer_mtu = 0;
+        if(ble_l2cap_get_chan_info(event->connect.chan, &info) == 0) peer_mtu = info.peer_l2cap_mtu;
+        CocApiEvent ev = {
+            .type = CocApiConnected,
+            .channel_index = (uint8_t)idx,
+            .conn_handle = event->connect.conn_handle,
+            .peer_mtu = peer_mtu};
+        coc_api_emit(&ev);
+        return 0;
+    }
+
+    case BLE_L2CAP_EVENT_COC_DISCONNECTED: {
+        int idx = coc_api_index_of(event->disconnect.chan);
+        CocApiEvent ev = {
+            .type = CocApiDisconnected,
+            .channel_index = (uint8_t)(idx < 0 ? 0 : idx),
+            .conn_handle = event->disconnect.conn_handle};
+        coc_api_emit(&ev);
+        if(idx >= 0) coc_api_chans[idx].in_use = false;
+        return 0;
+    }
+
+    case BLE_L2CAP_EVENT_COC_DATA_RECEIVED: {
+        struct os_mbuf* sdu_rx = event->receive.sdu_rx;
+        int idx = coc_api_index_of(event->receive.chan);
+        uint16_t len = OS_MBUF_PKTLEN(sdu_rx);
+        if(len > sizeof(coc_api_rxbuf)) len = sizeof(coc_api_rxbuf);
+        if(len && os_mbuf_copydata(sdu_rx, 0, len, coc_api_rxbuf) == 0 && idx >= 0) {
+            CocApiEvent ev = {
+                .type = CocApiData,
+                .channel_index = (uint8_t)idx,
+                .conn_handle = coc_api_chans[idx].conn_handle,
+                .data = coc_api_rxbuf,
+                .data_len = len};
+            coc_api_emit(&ev);
+        }
+        /* Re-arm reception, then free the received buffer. */
+        struct os_mbuf* next = coc_api_sdu();
+        if(next) ble_l2cap_recv_ready(event->receive.chan, next);
+        os_mbuf_free_chain(sdu_rx);
+        return 0;
+    }
+
+    case BLE_L2CAP_EVENT_COC_TX_UNSTALLED: {
+        int idx = coc_api_index_of(event->tx_unstalled.chan);
+        if(idx >= 0) {
+            CocApiEvent ev = {
+                .type = CocApiTxUnstalled,
+                .channel_index = (uint8_t)idx,
+                .conn_handle = coc_api_chans[idx].conn_handle};
+            coc_api_emit(&ev);
+        }
+        return 0;
+    }
+
+    default:
+        return 0;
+    }
+}
+
+void coc_api_init(CocApiCallback dispatch, void* context) {
+    coc_api_cb = dispatch;
+    coc_api_ctx = context;
+    memset(coc_api_chans, 0, sizeof(coc_api_chans));
+    FURI_LOG_I(TAG, "coc_api initialized");
+}
+
+void coc_api_deinit(void) {
+    coc_api_cb = NULL;
+    coc_api_ctx = NULL;
+    memset(coc_api_chans, 0, sizeof(coc_api_chans));
+}
+
+bool coc_api_listen(uint16_t psm, uint16_t mtu) {
+    int rc = ble_l2cap_create_server(psm, mtu, coc_api_l2cap_event, NULL);
+    FURI_LOG_I(TAG, "coc_api listen PSM 0x%04X mtu=%u rc=%d", psm, mtu, rc);
+    return rc == 0;
+}
+
+bool coc_api_connect(uint16_t conn_handle, uint16_t psm, uint16_t mtu) {
+    struct os_mbuf* sdu_rx = os_msys_get_pkthdr(mtu, 0);
+    if(!sdu_rx) return false;
+    int rc = ble_l2cap_connect(conn_handle, psm, mtu, sdu_rx, coc_api_l2cap_event, NULL);
+    FURI_LOG_I(TAG, "coc_api connect handle=%u PSM 0x%04X rc=%d", conn_handle, psm, rc);
+    if(rc != 0) os_mbuf_free_chain(sdu_rx);
+    return rc == 0;
+}
+
+bool coc_api_send(uint8_t channel_index, const uint8_t* data, uint16_t len) {
+    struct ble_l2cap_chan* chan = coc_api_chan_at(channel_index);
+    if(!chan || len == 0) return false;
+    struct os_mbuf* tx = os_msys_get_pkthdr(len, 0);
+    if(!tx) return false;
+    if(os_mbuf_append(tx, data, len) != 0) {
+        os_mbuf_free_chain(tx);
+        return false;
+    }
+    int rc = ble_l2cap_send(chan, tx);
+    if(rc != 0 && rc != BLE_HS_ESTALLED) {
+        os_mbuf_free_chain(tx);
+        return false;
+    }
+    return true;
+}
+
+bool coc_api_grant(uint8_t channel_index) {
+    struct ble_l2cap_chan* chan = coc_api_chan_at(channel_index);
+    if(!chan) return false;
+    struct os_mbuf* sdu = coc_api_sdu();
+    if(!sdu) return false;
+    return ble_l2cap_recv_ready(chan, sdu) == 0;
+}
+
+bool coc_api_disconnect(uint8_t channel_index) {
+    struct ble_l2cap_chan* chan = coc_api_chan_at(channel_index);
+    if(!chan) return false;
+    return ble_l2cap_disconnect(chan) == 0;
+}
