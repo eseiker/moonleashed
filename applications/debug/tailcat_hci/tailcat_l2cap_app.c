@@ -93,7 +93,14 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
     case L2F_SEND:
         if(f->len >= 1) {
             uint8_t ch = f->data[0];
-            if(ble_l2cap_coc_send(ch, f->data + 1, f->len - 1)) app->tx_sdus++;
+            if(ble_l2cap_coc_send(ch, f->data + 1, f->len - 1)) {
+                app->tx_sdus++;
+            } else {
+                /* Unknown channel, SDU above the negotiated MTU, or no mbufs:
+                 * tell the host instead of failing silently. */
+                uint8_t code[2] = {0x05, 0x00};
+                l2_emit(app, L2F_ERROR, code, sizeof(code));
+            }
         }
         break;
     case L2F_CLOSE:
