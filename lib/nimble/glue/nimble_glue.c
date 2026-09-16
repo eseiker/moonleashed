@@ -68,6 +68,13 @@ static struct {
     volatile uint16_t conn_handle;
     volatile uint8_t conn_count;
     volatile bool central_probe; /* Milestone 2 gate: scanning as central after suspend */
+    /* Raw advertising override (TASK-646): when set, start_advertise installs this
+     * payload instead of the companion fields, e.g. the DCT FC73 session adv. */
+    bool has_custom_adv;
+    uint8_t custom_adv[31];
+    uint8_t custom_adv_len;
+    uint8_t custom_rsp[31];
+    uint8_t custom_rsp_len;
     volatile uint32_t scan_count;
     uint8_t addr_type;
     uint8_t addr[6];
@@ -291,6 +298,31 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
 }
 
 static void start_advertise(void) {
+    /* Raw override (TASK-646): a FAP installed its own payload (e.g. the DCT
+     * FC73 session advertisement). Use it verbatim instead of the companion
+     * fields; nimble_glue_adv_clear restores the companion advertisement. */
+    if(glue.has_custom_adv) {
+        int rc = ble_gap_adv_set_data(glue.custom_adv, glue.custom_adv_len);
+        if(rc != 0) {
+            FURI_LOG_E(TAG, "adv_set_data(raw) failed: %d", rc);
+            return;
+        }
+        ble_gap_adv_rsp_set_data(glue.custom_rsp, glue.custom_rsp_len);
+        struct ble_gap_adv_params advp;
+        memset(&advp, 0, sizeof(advp));
+        advp.conn_mode = BLE_GAP_CONN_MODE_UND;
+        advp.disc_mode = BLE_GAP_DISC_MODE_GEN;
+        rc = ble_gap_adv_start(glue.addr_type, NULL, BLE_HS_FOREVER, &advp, gap_event, NULL);
+        if(rc != 0) {
+            FURI_LOG_E(TAG, "adv_start(raw) failed: %d", rc);
+            return;
+        }
+        glue.advertising = true;
+        FURI_LOG_I(
+            TAG, "Advertising started (raw %u/%u bytes)", glue.custom_adv_len, glue.custom_rsp_len);
+        return;
+    }
+
     /* Advertising payload: flags + the 16-bit Serial Service UUID (0x3080 |
      * hw_color, exactly what the stock serial profile advertises) + the device
      * name. Appearance goes in the scan response to keep the 31-byte adv packet
@@ -560,6 +592,40 @@ bool nimble_glue_is_advertising(void) {
 
 bool nimble_glue_is_scanning(void) {
     return glue.scanning;
+}
+
+bool nimble_glue_adv_set_raw(
+    const uint8_t* adv,
+    uint8_t adv_len,
+    const uint8_t* rsp,
+    uint8_t rsp_len) {
+    if(adv_len > sizeof(glue.custom_adv) || rsp_len > sizeof(glue.custom_rsp)) return false;
+    if((adv_len && !adv) || (rsp_len && !rsp)) return false;
+    if(adv_len) memcpy(glue.custom_adv, adv, adv_len);
+    glue.custom_adv_len = adv_len;
+    if(rsp_len) memcpy(glue.custom_rsp, rsp, rsp_len);
+    glue.custom_rsp_len = rsp_len;
+    glue.has_custom_adv = true;
+    /* Re-advertise with the new payload (maybe_advertise respects the central
+     * suspend and the link budget). */
+    if(glue.advertising) {
+        ble_gap_adv_stop();
+        glue.advertising = false;
+    }
+    maybe_advertise();
+    return true;
+}
+
+void nimble_glue_adv_clear(void) {
+    if(!glue.has_custom_adv) return;
+    glue.has_custom_adv = false;
+    glue.custom_adv_len = 0;
+    glue.custom_rsp_len = 0;
+    if(glue.advertising) {
+        ble_gap_adv_stop();
+        glue.advertising = false;
+    }
+    maybe_advertise(); /* back to the companion advertisement */
 }
 
 bool nimble_glue_central_probe_start(void) {

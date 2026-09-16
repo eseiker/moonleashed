@@ -8,13 +8,15 @@
  * carries L2CAP CoC control + SDUs. Frame layout: [type:1][len:2 LE][payload:len].
  */
 
-#define L2F_PAYLOAD_MAX 512U
+/* Large enough for a full DCT SDU (MTU 1550) plus the channel byte. */
+#define L2F_PAYLOAD_MAX 2048U
 
 /* Host -> FAP */
 #define L2F_LISTEN     0x01 /* [psm:2]                     start a CoC server   */
 #define L2F_SEND       0x02 /* [channel:1][data...]        send an SDU          */
 #define L2F_CLOSE      0x03 /* [channel:1]                 disconnect a channel */
 #define L2F_CONNECT    0x04 /* [name...]                   central: scan+connect */
+#define L2F_ADVERTISE  0x05 /* [adv_len:1][adv...][rsp...] install raw advertisement */
 
 /* FAP -> Host */
 #define L2F_CONNECTED    0x81 /* [channel:1][conn:2]  */

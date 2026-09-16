@@ -1,5 +1,5 @@
 entry,status,name,type,params
-Version,+,88.14,,
+Version,+,88.15,,
 Header,+,applications/drivers/subghz/cc1101_ext/cc1101_ext_interconnect.h,,
 Header,+,applications/services/applications.h,,
 Header,+,applications/services/bt/bt_service/bt.h,,
@@ -284,6 +284,7 @@ Header,+,lib/toolbox/value_index.h,,
 Header,+,lib/toolbox/varint.h,,
 Header,+,lib/toolbox/version.h,,
 Header,+,lib/u8g2/u8g2_glue.h,,
+Header,+,targets/f7/ble_glue/furi_ble/adv.h,,
 Header,+,targets/f7/ble_glue/furi_ble/event_dispatcher.h,,
 Header,+,targets/f7/ble_glue/furi_ble/furi_ble_session.h,,
 Header,+,targets/f7/ble_glue/furi_ble/gatt.h,,
@@ -1426,6 +1427,8 @@ Function,-,ftrylockfile,int,FILE*
 Function,-,funlockfile,void,FILE*
 Function,-,funopen,FILE*,"const void*, int (*)(void*, char*, int), int (*)(void*, const char*, int), fpos_t (*)(void*, fpos_t, int), int (*)(void*)"
 Function,-,furi_background,void,
+Function,+,furi_ble_adv_clear,void,
+Function,+,furi_ble_adv_set,_Bool,"const uint8_t*, uint8_t, const uint8_t*, uint8_t"
 Function,+,furi_ble_session_alloc,FuriBleSession*,const FuriBleSessionConfig*
 Function,+,furi_ble_session_conn_handle,uint16_t,FuriBleSession*
 Function,+,furi_ble_session_free,void,FuriBleSession*

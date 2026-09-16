@@ -168,7 +168,10 @@ bool ble_l2cap_coc_accept(
 }
 
 bool ble_l2cap_coc_send(uint8_t channel_index, const uint8_t* data, uint16_t data_len) {
-    if(data_len > 252) data_len = 252;
+    /* Moon-Firmware's ST ACI backend caps a call at 252 bytes (an HCI command
+     * buffer limit). The NimBLE backend sends a whole SDU up to the negotiated
+     * MTU and segments it into MPS-sized PDUs itself, so no cap here: an
+     * oversized SDU fails (returns false) instead of being silently truncated. */
     return coc_api_send(channel_index, data, data_len);
 }
 

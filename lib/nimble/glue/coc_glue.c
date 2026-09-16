@@ -211,7 +211,7 @@ static struct {
 
 static CocApiCallback coc_api_cb;
 static void* coc_api_ctx;
-static uint8_t coc_api_rxbuf[1024];
+static uint8_t coc_api_rxbuf[2048]; /* holds a full DCT SDU (MTU 1550) */
 
 static int coc_api_alloc_index(struct ble_l2cap_chan* chan, uint16_t conn_handle) {
     for(int i = 0; i < COC_API_MAX_CHAN; i++) {

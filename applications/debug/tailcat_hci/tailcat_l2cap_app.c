@@ -14,6 +14,7 @@
 #include <cli/cli_vcp.h>
 
 #include <furi_ble/l2cap_coc.h>
+#include <furi_ble/adv.h>
 #include "l2cap_frame.h"
 
 #define TAG "TailcatL2cap"
@@ -92,6 +93,20 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
     case L2F_CLOSE:
         if(f->len >= 1) ble_l2cap_coc_disconnect(f->data[0]);
         break;
+    case L2F_ADVERTISE:
+        /* [adv_len:1][adv...][rsp...]: install the caller's advertisement (e.g.
+         * the DCT FC73 session adv) on the resident host so peers discover us. */
+        if(f->len >= 1 && (uint16_t)(1 + f->data[0]) <= f->len) {
+            uint8_t adv_len = f->data[0];
+            const uint8_t* adv = f->data + 1;
+            const uint8_t* rsp = f->data + 1 + adv_len;
+            uint16_t rsp_len = f->len - 1 - adv_len;
+            if(rsp_len > 31 || !furi_ble_adv_set(adv, adv_len, rsp, (uint8_t)rsp_len)) {
+                uint8_t code[2] = {0x01, 0x00};
+                l2_emit(app, L2F_ERROR, code, sizeof(code));
+            }
+        }
+        break;
     case L2F_CONNECT: {
         /* Central (Flipper connects out) is not wired in this slice; report. */
         uint8_t code[2] = {0xFF, 0xFF};
@@ -127,7 +142,9 @@ static int32_t l2_worker(void* context) {
     L2App* app = context;
     uint8_t usb_bytes[CDC_DATA_SZ];
     uint8_t out[64];
-    L2Frame frame;
+    /* L2F_PAYLOAD_MAX is 2 KiB, so keep the reassembly frame off the 2 KiB
+     * worker stack. One worker, so a static is safe. */
+    static L2Frame frame;
     l2f_reset(&frame);
 
     while(!app->stop && !app->failed) {
@@ -220,6 +237,7 @@ int32_t tailcat_l2cap_app(void* context) {
         cli_vcp_enable(cli);
     }
 
+    furi_ble_adv_clear(); /* restore the companion advertisement */
     ble_l2cap_coc_set_callback(0, NULL, NULL);
     ble_l2cap_coc_deinit();
 

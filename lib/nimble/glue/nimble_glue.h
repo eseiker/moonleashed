@@ -62,6 +62,18 @@ bool nimble_glue_is_connected(void);
 /* True while the host is scanning as observer/central. */
 bool nimble_glue_is_scanning(void);
 
+/* Raw advertising override (TASK-646). Install a caller-supplied advertising
+ * payload (and optional scan response, each <= 31 bytes) that replaces the
+ * companion advertisement until nimble_glue_adv_clear. Used for the DCT FC73
+ * session advertisement. Existing connections are untouched; only what new
+ * peers discover changes. Returns false on bad lengths. */
+bool nimble_glue_adv_set_raw(
+    const uint8_t* adv,
+    uint8_t adv_len,
+    const uint8_t* rsp,
+    uint8_t rsp_len);
+void nimble_glue_adv_clear(void);
+
 /* Central capability probe (TASK-615, Milestone 2 gate). Suspends the companion
  * (stops advertising and drops the bound peripheral link), then starts an active
  * scan as observer/central once the last peripheral link is gone. This is the
