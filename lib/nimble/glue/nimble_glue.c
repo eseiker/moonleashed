@@ -40,6 +40,7 @@
 #include "serial_gatt.h"
 #include "serial_store.h"
 #include "hid_gatt.h"
+#include "coc_glue.h"
 
 #define TAG "NimbleGlue"
 
@@ -388,6 +389,13 @@ bool nimble_glue_start(NimbleMode mode) {
             FURI_LOG_E(TAG, "hid_gatt_register failed: %d", rc);
             return false;
         }
+    }
+
+    /* L2CAP CoC server (TASK-615): the DCT channel, registered alongside the GATT
+     * services so a peer can open a CoC on a peripheral link. Non-fatal if it
+     * fails — the companion GATT still runs. */
+    if(coc_server_start() != 0) {
+        FURI_LOG_W(TAG, "CoC server registration failed");
     }
 
     glue.host_run = true;

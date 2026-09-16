@@ -396,7 +396,8 @@
 #endif
 
 #ifndef MYNEWT_VAL_MSYS_1_BLOCK_COUNT
-#define MYNEWT_VAL_MSYS_1_BLOCK_COUNT (12)
+/* More mbufs: two connections plus CoC SDU/PDU traffic (TASK-615). */
+#define MYNEWT_VAL_MSYS_1_BLOCK_COUNT (24)
 #endif
 
 #ifndef MYNEWT_VAL_MSYS_1_BLOCK_SIZE
@@ -820,7 +821,9 @@
 #endif
 
 #ifndef MYNEWT_VAL_BLE_MAX_CONNECTIONS
-#define MYNEWT_VAL_BLE_MAX_CONNECTIONS (1)
+/* Two links: the companion peripheral (Serial Service RPC) and a second incoming
+ * peripheral carrying the DCT L2CAP CoC (KNOW-623). TASK-615. */
+#define MYNEWT_VAL_BLE_MAX_CONNECTIONS (2)
 #endif
 
 #ifndef MYNEWT_VAL_BLE_MAX_PERIODIC_SYNCS
@@ -1140,7 +1143,8 @@
 #endif
 
 #ifndef MYNEWT_VAL_BLE_L2CAP_COC_MAX_NUM
-#define MYNEWT_VAL_BLE_L2CAP_COC_MAX_NUM (0)
+/* Enable L2CAP LE Credit-Based CoC for the DCT channel (TASK-615). */
+#define MYNEWT_VAL_BLE_L2CAP_COC_MAX_NUM (2)
 #endif
 
 #ifndef MYNEWT_VAL_BLE_L2CAP_COC_MPS
@@ -1148,7 +1152,7 @@
 #endif
 
 #ifndef MYNEWT_VAL_BLE_L2CAP_COC_SDU_BUFF_COUNT
-#define MYNEWT_VAL_BLE_L2CAP_COC_SDU_BUFF_COUNT (1)
+#define MYNEWT_VAL_BLE_L2CAP_COC_SDU_BUFF_COUNT (4)
 #endif
 
 #ifndef MYNEWT_VAL_BLE_L2CAP_ENHANCED_COC

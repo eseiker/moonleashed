@@ -20,4 +20,15 @@
  */
 void coc_probe_capabilities(void);
 
+/* Register the L2CAP CoC echo server on the test PSM. Call once in
+ * nimble_glue_start after the host services are registered. Returns 0 on
+ * success. Proves NimBLE CoC on the HCILayer radio before the DCT logic lands. */
+int coc_server_start(void);
+
+/* True while a peer has an open CoC channel. */
+bool coc_is_connected(void);
+
+/* Bytes received on the CoC since it connected. */
+uint32_t coc_rx_bytes(void);
+
 #endif /* COC_GLUE_H_ */
