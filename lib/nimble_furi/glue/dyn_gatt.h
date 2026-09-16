@@ -78,10 +78,23 @@ typedef struct {
     void* ctx;
 } DynGattHooks;
 
+/* Each service belongs to an owner, and each owner has its own hooks. A
+ * characteristic's write, CCCD change and indicate-done go to its service's
+ * owner; on_committed goes to every owner, since a rebuild affects them all.
+ * The stock ble_gatt_* shim owns DYN_GATT_OWNER_SHIM; the ble_gatt_server_*
+ * API owns DYN_GATT_OWNER_DIRECT. */
+#define DYN_GATT_OWNER_SHIM   0
+#define DYN_GATT_OWNER_DIRECT 1
+#define DYN_GATT_OWNER_COUNT  2
+
+/* Shorthand for owner DYN_GATT_OWNER_SHIM. */
 void dyn_gatt_set_hooks(const DynGattHooks* hooks);
+void dyn_gatt_set_owner_hooks(uint8_t owner, const DynGattHooks* hooks);
 
 /* Definition API (any thread). Returns an id >= 0, or -1 when full/invalid. */
+/* Shorthand for owner DYN_GATT_OWNER_SHIM. */
 int dyn_gatt_service_add(const DynGattUuid* uuid, bool primary);
+int dyn_gatt_service_add_owned(const DynGattUuid* uuid, bool primary, uint8_t owner);
 bool dyn_gatt_service_remove(int svc_id);
 int dyn_gatt_char_add(
     int svc_id,

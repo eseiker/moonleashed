@@ -46,6 +46,7 @@
 #include "gattc_glue.h"
 #include "dyn_gatt.h"
 #include "fixedcid_glue.h"
+#include "sm_glue.h"
 
 #define TAG "NimbleGlue"
 
@@ -296,6 +297,13 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         break;
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
+        glue.pairing = true;
+        /* A registered security consumer (TASK-665) drives pairing instead. */
+        if(sm_glue_on_passkey_action(
+               event->passkey.conn_handle,
+               event->passkey.params.action,
+               event->passkey.params.numcmp))
+            break;
         /* DISPLAY_ONLY IO cap with MITM: we pick a 6-digit passkey, show it on
          * the Flipper screen, and inject it; the phone types the same number. */
         if(event->passkey.params.action == BLE_SM_IOACT_DISP) {
@@ -311,6 +319,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
 
     case BLE_GAP_EVENT_ENC_CHANGE: {
         glue.pairing = false;
+        sm_glue_on_enc_change(event->enc_change.conn_handle, event->enc_change.status);
         struct ble_gap_conn_desc desc;
         if(ble_gap_conn_find(event->enc_change.conn_handle, &desc) == 0) {
             glue.bonded = desc.sec_state.encrypted;
@@ -333,6 +342,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
         /* The peer re-pairs while a bond already exists (RAM store lost it, or
          * the phone forgot). Drop the stale bond and let pairing proceed. */
+        sm_glue_on_repeat_pairing(event->repeat_pairing.conn_handle);
         struct ble_gap_conn_desc desc;
         if(ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
             ble_gap_unpair(&desc.peer_id_addr);
@@ -858,6 +868,28 @@ static int central_gap_event(struct ble_gap_event* event, void* arg) {
                 event->notify_rx.conn_handle, event->notify_rx.attr_handle, nbuf, len);
         }
         return 0;
+    }
+
+    /* Pairing on the central link is only ever driven by a security consumer
+     * (TASK-665); the companion's passkey-display path is peripheral-only. */
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+        sm_glue_on_passkey_action(
+            event->passkey.conn_handle,
+            event->passkey.params.action,
+            event->passkey.params.numcmp);
+        return 0;
+
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        sm_glue_on_enc_change(event->enc_change.conn_handle, event->enc_change.status);
+        return 0;
+
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        sm_glue_on_repeat_pairing(event->repeat_pairing.conn_handle);
+        struct ble_gap_conn_desc desc;
+        if(ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
+            ble_gap_unpair(&desc.peer_id_addr);
+        }
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
     }
 
     default:

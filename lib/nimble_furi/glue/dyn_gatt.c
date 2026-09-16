@@ -55,6 +55,7 @@ typedef struct {
 typedef struct {
     bool used;
     bool primary;
+    uint8_t owner;
     ble_uuid_any_t uuid;
     DynChr chrs[DYN_GATT_MAX_CHRS_PER_SVC];
     struct ble_gatt_chr_def chr_defs[DYN_GATT_MAX_CHRS_PER_SVC + 1];
@@ -63,7 +64,7 @@ typedef struct {
 
 static DynSvc* s_svcs[DYN_GATT_MAX_SVCS];
 static struct ble_gatt_svc_def s_svc_defs[DYN_GATT_MAX_SVCS + 1];
-static DynGattHooks s_hooks;
+static DynGattHooks s_hooks[DYN_GATT_OWNER_COUNT];
 static FuriMutex* s_mutex;
 static volatile bool s_dirty;
 static volatile bool s_live;
@@ -103,6 +104,16 @@ static DynChr* dyn_chr_at(int chr_id) {
     return &s_svcs[svc]->chrs[idx];
 }
 
+/* Hooks of the owner of the service a characteristic belongs to. */
+static DynGattHooks* dyn_hooks_for(int chr_id) {
+    if(chr_id < 0) return NULL;
+    int svc = chr_id / DYN_GATT_MAX_CHRS_PER_SVC;
+    if(svc >= DYN_GATT_MAX_SVCS || !s_svcs[svc]) return NULL;
+    uint8_t owner = s_svcs[svc]->owner;
+    if(owner >= DYN_GATT_OWNER_COUNT) return NULL;
+    return &s_hooks[owner];
+}
+
 /* ---- NimBLE access callbacks (host thread, or the notifying thread) ------- */
 
 static int dyn_chr_access(
@@ -130,9 +141,10 @@ static int dyn_chr_access(
         memcpy(c->value, buf, len);
         c->len = len;
         dyn_unlock();
-        if(s_hooks.on_write)
-            s_hooks.on_write(
-                chr_id, DynGattWriteValue, conn_handle, attr_handle, buf, len, s_hooks.ctx);
+        DynGattHooks* hooks = dyn_hooks_for(chr_id);
+        if(hooks && hooks->on_write)
+            hooks->on_write(
+                chr_id, DynGattWriteValue, conn_handle, attr_handle, buf, len, hooks->ctx);
         return 0;
     }
     default:
@@ -161,15 +173,24 @@ void dyn_gatt_init(void) {
 }
 
 void dyn_gatt_set_hooks(const DynGattHooks* hooks) {
+    dyn_gatt_set_owner_hooks(DYN_GATT_OWNER_SHIM, hooks);
+}
+
+void dyn_gatt_set_owner_hooks(uint8_t owner, const DynGattHooks* hooks) {
+    if(owner >= DYN_GATT_OWNER_COUNT) return;
     if(hooks) {
-        s_hooks = *hooks;
+        s_hooks[owner] = *hooks;
     } else {
-        memset(&s_hooks, 0, sizeof(s_hooks));
+        memset(&s_hooks[owner], 0, sizeof(s_hooks[owner]));
     }
 }
 
 int dyn_gatt_service_add(const DynGattUuid* uuid, bool primary) {
-    if(!uuid || !s_mutex) return -1;
+    return dyn_gatt_service_add_owned(uuid, primary, DYN_GATT_OWNER_SHIM);
+}
+
+int dyn_gatt_service_add_owned(const DynGattUuid* uuid, bool primary, uint8_t owner) {
+    if(!uuid || !s_mutex || owner >= DYN_GATT_OWNER_COUNT) return -1;
     ble_uuid_any_t nuuid;
     if(!dyn_to_nimble_uuid(uuid, &nuuid)) return -1;
 
@@ -187,6 +208,7 @@ int dyn_gatt_service_add(const DynGattUuid* uuid, bool primary) {
         memset(s, 0, sizeof(DynSvc));
         s->used = true;
         s->primary = primary;
+        s->owner = owner;
         s->uuid = nuuid;
         s_svcs[slot] = s;
         s_dirty = true;
@@ -391,7 +413,10 @@ void dyn_gatt_register_all(void) {
 
 void dyn_gatt_after_start(void) {
     s_live = true;
-    if(s_hooks.on_committed) s_hooks.on_committed(s_hooks.ctx);
+    /* A rebuild moves every owner's handles, so tell them all. */
+    for(int i = 0; i < DYN_GATT_OWNER_COUNT; i++) {
+        if(s_hooks[i].on_committed) s_hooks[i].on_committed(s_hooks[i].ctx);
+    }
 }
 
 void dyn_gatt_on_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool notify, bool indicate) {
@@ -408,14 +433,15 @@ void dyn_gatt_on_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool noti
         }
     }
     dyn_unlock();
-    if(chr_id < 0 || !s_hooks.on_write) return;
+    DynGattHooks* hooks = dyn_hooks_for(chr_id);
+    if(chr_id < 0 || !hooks || !hooks->on_write) return;
     uint8_t cccd[2] = {(uint8_t)((notify ? 0x01 : 0) | (indicate ? 0x02 : 0)), 0x00};
-    s_hooks.on_write(
-        chr_id, DynGattWriteCccd, conn_handle, attr_handle + 1, cccd, sizeof(cccd), s_hooks.ctx);
+    hooks->on_write(
+        chr_id, DynGattWriteCccd, conn_handle, attr_handle + 1, cccd, sizeof(cccd), hooks->ctx);
 }
 
 void dyn_gatt_on_notify_tx(uint16_t conn_handle, uint16_t attr_handle, int status, bool indication) {
-    if(!indication || status != BLE_HS_EDONE || !s_hooks.on_indicate_done) return;
+    if(!indication || status != BLE_HS_EDONE) return;
     int chr_id = -1;
     dyn_lock();
     for(int i = 0; i < DYN_GATT_MAX_SVCS && chr_id < 0; i++) {
@@ -429,5 +455,7 @@ void dyn_gatt_on_notify_tx(uint16_t conn_handle, uint16_t attr_handle, int statu
         }
     }
     dyn_unlock();
-    if(chr_id >= 0) s_hooks.on_indicate_done(chr_id, conn_handle, s_hooks.ctx);
+    DynGattHooks* hooks = dyn_hooks_for(chr_id);
+    if(chr_id >= 0 && hooks && hooks->on_indicate_done)
+        hooks->on_indicate_done(chr_id, conn_handle, hooks->ctx);
 }
