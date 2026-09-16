@@ -22,6 +22,10 @@ nimble_include_paths = [
     "#/lib/nimble/porting/nimble/include",
     "#/lib/nimble_furi/npl/furi/include",
     "#/lib/nimble_furi/glue",
+    # The fixed-CID relay (fixedcid_glue.c, TASK-663) needs NimBLE's private
+    # host headers to install an extra fixed L2CAP channel. Only our glue in
+    # lib/nimble_furi uses these; upstream is unchanged.
+    "#/lib/nimble/nimble/host/src",
 ]
 
 # Expose only the plain-C glue headers to the rest of the firmware (the bt

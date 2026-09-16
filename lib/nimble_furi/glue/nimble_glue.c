@@ -45,6 +45,7 @@
 #include "coc_glue.h"
 #include "gattc_glue.h"
 #include "dyn_gatt.h"
+#include "fixedcid_glue.h"
 
 #define TAG "NimbleGlue"
 
@@ -208,6 +209,8 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             glue.advertising = false; /* the controller stops advertising on connect */
             glue.conn_count++;
             conn_handle_track(event->connect.conn_handle, true);
+            /* Install any registered fixed L2CAP channels (TASK-663). */
+            fixedcid_on_connect(event->connect.conn_handle);
             /* Bind the companion services (Serial/HID) to the FIRST peripheral
              * link only. A second incoming link (e.g. a CoC-only central) must
              * not clobber the companion's GATT connection. The CoC data path is
@@ -821,6 +824,7 @@ static int central_gap_event(struct ble_gap_event* event, void* arg) {
         if(event->connect.status == 0) {
             central.conn_handle = event->connect.conn_handle;
             central.state = CENTRAL_RUNNING;
+            fixedcid_on_connect(event->connect.conn_handle);
             FURI_LOG_I(TAG, "Central link up handle=%u", central.conn_handle);
             if(central.cb) central.cb(NimbleCentralConnected, central.conn_handle, 0, central.ctx);
         } else {

@@ -1164,7 +1164,9 @@
 #endif
 
 #ifndef MYNEWT_VAL_BLE_L2CAP_MAX_CHANS
-#define MYNEWT_VAL_BLE_L2CAP_MAX_CHANS (3*MYNEWT_VAL_BLE_MAX_CONNECTIONS)
+/* ATT + SIG + SM (3) per link, plus room for one extra fixed CID per link
+ * (the Magnet channel 0x003A the fixed-CID glue installs, TASK-663). */
+#define MYNEWT_VAL_BLE_L2CAP_MAX_CHANS (4*MYNEWT_VAL_BLE_MAX_CONNECTIONS)
 #endif
 
 #ifndef MYNEWT_VAL_BLE_L2CAP_RX_FRAG_TIMEOUT
