@@ -11,8 +11,6 @@
     "sdk_symbols": "api_symbols.csv",
     "linker_dependencies": [
         "print",
-        "nimble",
-        "ble_profile",
         "flipper18",
         "furi",
         "freertos",
