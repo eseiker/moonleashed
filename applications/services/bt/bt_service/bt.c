@@ -782,7 +782,20 @@ int32_t bt_srv(void* p) {
     if(use_nimble) {
         /* Load settings so bring-up sees the persisted BLE mode (and enabled). */
         bt_settings_load(&bt->bt_settings);
-        if(!bt_nimble_bringup(bt)) {
+#ifdef BT_DIAG_RAW_HCI
+        /* Diagnostic (TASK-615): force Raw-HCI mode so the resident host leaves
+         * the controller free for a raw-HCI FAP (Tailcat HCI bridge + Bumble),
+         * to test the DCT L2CAP CoC flow on the HCILayer radio. */
+        bt->bt_settings.ble_mode = NimbleModeRawHci;
+#endif
+        if(bt->bt_settings.ble_mode == NimbleModeRawHci) {
+            /* Raw-HCI mode (KNOW-606 slot): do not acquire the controller. A
+             * raw-HCI consumer FAP (Tailcat) takes it over USB. The resident
+             * NimBLE host and the companion stay down while this mode is set. */
+            FURI_LOG_I(
+                TAG, "Raw-HCI mode: resident NimBLE host not started; controller left free");
+            bt->nimble_active = false;
+        } else if(!bt_nimble_bringup(bt)) {
             FURI_LOG_E(TAG, "NimBLE host bring-up failed; BLE unavailable");
             bt->status = BtStatusUnavailable;
         }
