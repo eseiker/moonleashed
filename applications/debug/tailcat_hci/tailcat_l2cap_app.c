@@ -51,10 +51,12 @@ static void on_coc(BleL2capCocEvent* ev, void* context) {
     L2App* app = context;
     switch(ev->type) {
     case BleL2capCocEventConnected: {
-        uint8_t p[3] = {
+        uint8_t p[5] = {
             ev->channel_index,
             (uint8_t)(ev->connection_handle & 0xFF),
-            (uint8_t)(ev->connection_handle >> 8)};
+            (uint8_t)(ev->connection_handle >> 8),
+            (uint8_t)(ev->connected.peer_mtu & 0xFF),
+            (uint8_t)(ev->connected.peer_mtu >> 8)};
         app->connected = true;
         if(app->central) app->central_coc_opened = true;
         l2_emit(app, L2F_CONNECTED, p, sizeof(p));

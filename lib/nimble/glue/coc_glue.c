@@ -276,7 +276,10 @@ static int coc_api_l2cap_event(struct ble_l2cap_event* event, void* arg) {
         }
         struct ble_l2cap_chan_info info;
         uint16_t peer_mtu = 0;
-        if(ble_l2cap_get_chan_info(event->connect.chan, &info) == 0) peer_mtu = info.peer_l2cap_mtu;
+        /* The peer's CoC SDU MTU is peer_coc_mtu (coc_tx.mtu). peer_l2cap_mtu is
+         * the L2CAP-level channel MTU, not the SDU bound a sender must respect.
+         * The peer MPS is private to NimBLE (peer_coc_mps) and is not reported. */
+        if(ble_l2cap_get_chan_info(event->connect.chan, &info) == 0) peer_mtu = info.peer_coc_mtu;
         CocApiEvent ev = {
             .type = CocApiConnected,
             .channel_index = (uint8_t)idx,

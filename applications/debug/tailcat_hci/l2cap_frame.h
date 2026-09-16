@@ -29,7 +29,10 @@ _Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must
 #define L2F_ADVERTISE  0x05 /* [adv_len:1][adv...][rsp...] install raw advertisement */
 
 /* FAP -> Host */
-#define L2F_CONNECTED    0x81 /* [channel:1][conn:2]  */
+#define L2F_CONNECTED    0x81 /* [channel:1][conn:2][peer_mtu:2] — peer_mtu is the
+                                * peer's CoC SDU MTU; cap SENDs at min(peer_mtu,
+                                * L2F_COC_MTU). Appended field: readers of the old
+                                * 3-byte payload keep working. */
 #define L2F_DATA         0x82 /* [channel:1][data...] */
 #define L2F_DISCONNECTED 0x83 /* [channel:1]          */
 #define L2F_ERROR        0x84 /* [code:2]             */
