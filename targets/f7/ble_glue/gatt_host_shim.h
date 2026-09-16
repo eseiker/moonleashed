@@ -65,6 +65,16 @@ void ble_gatt_host_shim_set(const BleGattHostShim* shim);
 /** @return true while a shim is installed (the CPU2 ACI path is bypassed). */
 bool ble_gatt_host_shim_active(void);
 
+/**
+ * Make dynamic GATT services live (TASK-632). Services other than HID / Battery
+ * / Device Information that were added or removed through ble_gatt_service_add
+ * and ble_gatt_characteristic_* become real NimBLE services; this asks the host
+ * to rebuild its table when anything changed. The rebuild drops every link and
+ * re-advertises, like a stock profile change. No-op when nothing changed. Call
+ * after a profile's start or stop returns.
+ */
+void ble_gatt_host_shim_commit(void);
+
 #ifdef __cplusplus
 }
 #endif

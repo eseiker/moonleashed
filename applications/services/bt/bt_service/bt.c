@@ -463,6 +463,12 @@ static void bt_nimble_change_profile(Bt* bt, BtMessage* message) {
     bt->current_profile = instance;
     if(message->profile_instance) *message->profile_instance = instance;
     if(message->result) *message->result = instance != NULL;
+
+    /* TASK-632: if the stopped or started profile added/removed services the
+     * NimBLE host does not serve statically, rebuild the GATT table once for
+     * both. Like a stock profile change this drops links and re-advertises; a
+     * HID-only profile changes nothing here, so the companion stays up. */
+    ble_gatt_host_shim_commit();
 }
 
 static void bt_change_profile(Bt* bt, BtMessage* message) {

@@ -74,6 +74,13 @@ bool nimble_glue_adv_set_raw(
     uint8_t rsp_len);
 void nimble_glue_adv_clear(void);
 
+/* Rebuild the GATT table so dynamic services (dyn_gatt.h) go live (TASK-632).
+ * Asynchronous and safe from any thread. It stops advertising and drops every
+ * peripheral link (like a stock profile change), rebuilds once the last link is
+ * gone, sends Service Changed, then re-advertises. Deferred while a central
+ * session runs. Returns false if the host is not started. */
+bool nimble_glue_gatt_rebuild_request(void);
+
 /* Central capability probe (TASK-615, Milestone 2 gate). Suspends the companion
  * (stops advertising and drops the bound peripheral link), then starts an active
  * scan as observer/central once the last peripheral link is gone. This is the

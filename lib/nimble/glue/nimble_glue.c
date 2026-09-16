@@ -44,6 +44,7 @@
 #include "hid_gatt.h"
 #include "coc_glue.h"
 #include "gattc_glue.h"
+#include "dyn_gatt.h"
 
 #define TAG "NimbleGlue"
 
@@ -67,6 +68,13 @@ static struct {
     volatile uint32_t passkey;
     volatile uint16_t conn_handle;
     volatile uint8_t conn_count;
+    /* All peripheral link handles (the GATT rebuild must drop every link). */
+    uint16_t conn_handles[MYNEWT_VAL(BLE_MAX_CONNECTIONS)];
+    /* GATT table rebuild (TASK-632): pending = requested; rebuilding = links
+     * are being dropped / table is being rebuilt (blocks advertising). */
+    volatile bool gatt_rebuild_pending;
+    volatile bool gatt_rebuilding;
+    volatile bool gatt_rebuild_queued;
     volatile bool central_probe; /* Milestone 2 gate: scanning as central after suspend */
     /* Raw advertising override (TASK-646): when set, start_advertise installs this
      * payload instead of the companion fields, e.g. the DCT FC73 session adv. */
@@ -120,8 +128,26 @@ static void central_finish(void);
  * KNOW-623). No-op when already advertising or when all links are in use. The
  * controller allows advertising while a peripheral connection is up (KNOW-618,
  * supported-states bits 24/25). */
+static void gatt_rebuild_post(void);
+static void gatt_rebuild_event_fn(struct ble_npl_event* ev);
+static struct ble_npl_event gatt_rebuild_event;
+
+static void conn_handle_track(uint16_t handle, bool up) {
+    for(size_t i = 0; i < COUNT_OF(glue.conn_handles); i++) {
+        if(up && glue.conn_handles[i] == BLE_HS_CONN_HANDLE_NONE) {
+            glue.conn_handles[i] = handle;
+            return;
+        }
+        if(!up && glue.conn_handles[i] == handle) {
+            glue.conn_handles[i] = BLE_HS_CONN_HANDLE_NONE;
+            return;
+        }
+    }
+}
+
 static void maybe_advertise(void) {
     if(glue.central_probe) return; /* companion is suspended for a central scan */
+    if(glue.gatt_rebuilding) return; /* table rebuild needs no GAP procedure */
     if(glue.advertising) return;
     if(glue.conn_count >= MYNEWT_VAL(BLE_MAX_CONNECTIONS)) return;
     start_advertise();
@@ -177,6 +203,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             glue.connected = true;
             glue.advertising = false; /* the controller stops advertising on connect */
             glue.conn_count++;
+            conn_handle_track(event->connect.conn_handle, true);
             /* Bind the companion services (Serial/HID) to the FIRST peripheral
              * link only. A second incoming link (e.g. a CoC-only central) must
              * not clobber the companion's GATT connection. The CoC data path is
@@ -206,6 +233,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         uint16_t h = event->disconnect.conn.conn_handle;
         FURI_LOG_I(TAG, "Peripheral link down, handle %u reason %d", h, event->disconnect.reason);
         if(glue.conn_count > 0) glue.conn_count--;
+        conn_handle_track(h, false);
         glue.connected = (glue.conn_count > 0);
         if(h == glue.conn_handle) {
             /* The companion link dropped: tear down its services and free the
@@ -220,7 +248,11 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         /* If a central scan probe is waiting for the companion to drop, start the
          * scan now that the last peripheral link is gone (KNOW-618: the ST
          * controller cannot scan while a peripheral link is up). */
-        if(glue.central_probe && glue.conn_count == 0) {
+        if(glue.gatt_rebuilding) {
+            /* Rebuild once the last link is gone. Re-post instead of rebuilding
+             * here: NimBLE may still count the dying link inside this callback. */
+            if(glue.conn_count == 0) gatt_rebuild_post();
+        } else if(glue.central_probe && glue.conn_count == 0) {
             start_scan();
         } else {
             maybe_advertise();
@@ -237,6 +269,11 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
     case BLE_GAP_EVENT_NOTIFY_TX:
         if(nimble_mode_has_serial(glue.mode))
             serial_gatt_on_notify_tx(event->notify_tx.attr_handle, event->notify_tx.status);
+        dyn_gatt_on_notify_tx(
+            event->notify_tx.conn_handle,
+            event->notify_tx.attr_handle,
+            event->notify_tx.status,
+            event->notify_tx.indication);
         break;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
@@ -244,6 +281,11 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             serial_gatt_on_subscribe(
                 event->subscribe.attr_handle,
                 event->subscribe.cur_notify || event->subscribe.cur_indicate);
+        dyn_gatt_on_subscribe(
+            event->subscribe.conn_handle,
+            event->subscribe.attr_handle,
+            event->subscribe.cur_notify,
+            event->subscribe.cur_indicate);
         break;
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
@@ -500,9 +542,13 @@ bool nimble_glue_start(NimbleMode mode) {
 
     memset(&glue, 0, sizeof(glue));
     glue.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    for(size_t i = 0; i < COUNT_OF(glue.conn_handles); i++)
+        glue.conn_handles[i] = BLE_HS_CONN_HANDLE_NONE;
     glue.mode = mode;
+    dyn_gatt_init();
 
     nimble_port_init();
+    ble_npl_event_init(&gatt_rebuild_event, gatt_rebuild_event_fn, NULL);
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
 
@@ -670,6 +716,86 @@ static void central_finish(void) {
     glue.scanning = false;
     maybe_advertise();
     FURI_LOG_I(TAG, "Central session ended, companion restored");
+    /* A GATT rebuild requested during the central session was deferred. */
+    if(glue.gatt_rebuild_pending) gatt_rebuild_post();
+}
+
+/* ---- GATT table rebuild (TASK-632) ------------------------------------------
+ * NimBLE only accepts service changes while ble_gatts_mutable(): no links and no
+ * GAP procedure. The rebuild runs on the host thread through an NPL event:
+ * stop advertising, drop every peripheral link, and once the last one is gone
+ * reset the table, re-register the built-in services in their boot order (so
+ * their handles, and bonded peers' cached handles and CCCDs, do not move), then
+ * the dynamic services, start the table and send Service Changed. A central
+ * session defers the rebuild until it ends. */
+
+static void gatt_rebuild_now(void) {
+    int rc = ble_gatts_reset();
+    if(rc != 0) {
+        FURI_LOG_E(TAG, "GATT rebuild: reset failed %d", rc);
+        glue.gatt_rebuild_pending = false;
+        glue.gatt_rebuilding = false;
+        maybe_advertise();
+        return;
+    }
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+    if(nimble_mode_has_serial(glue.mode)) serial_gatt_register();
+    if(nimble_mode_has_hid(glue.mode)) hid_gatt_register();
+    dyn_gatt_register_all();
+    rc = ble_gatts_start();
+    if(rc == 0) {
+        dyn_gatt_after_start();
+        ble_svc_gatt_changed(0x0001, 0xFFFF);
+        FURI_LOG_I(TAG, "GATT table rebuilt");
+    } else {
+        FURI_LOG_E(TAG, "GATT rebuild: start failed %d", rc);
+    }
+    glue.gatt_rebuilding = false;
+    /* Definitions changed while we rebuilt: go again. */
+    glue.gatt_rebuild_pending = dyn_gatt_dirty();
+    if(glue.gatt_rebuild_pending) {
+        gatt_rebuild_post();
+    } else {
+        maybe_advertise();
+    }
+}
+
+static void gatt_rebuild_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    glue.gatt_rebuild_queued = false;
+    if(!glue.gatt_rebuild_pending || !glue.synced) return;
+    if(central.active) {
+        FURI_LOG_I(TAG, "GATT rebuild deferred until the central session ends");
+        return;
+    }
+    if(!glue.gatt_rebuilding) {
+        glue.gatt_rebuilding = true;
+        if(glue.advertising) {
+            ble_gap_adv_stop();
+            glue.advertising = false;
+        }
+        for(size_t i = 0; i < COUNT_OF(glue.conn_handles); i++) {
+            if(glue.conn_handles[i] != BLE_HS_CONN_HANDLE_NONE)
+                ble_gap_terminate(glue.conn_handles[i], BLE_ERR_REM_USER_CONN_TERM);
+        }
+        if(glue.conn_count)
+            FURI_LOG_I(TAG, "GATT rebuild: dropping %u link(s)", glue.conn_count);
+    }
+    if(glue.conn_count == 0) gatt_rebuild_now();
+}
+
+static void gatt_rebuild_post(void) {
+    if(glue.gatt_rebuild_queued) return;
+    glue.gatt_rebuild_queued = true;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &gatt_rebuild_event);
+}
+
+bool nimble_glue_gatt_rebuild_request(void) {
+    if(!glue.started) return false;
+    glue.gatt_rebuild_pending = true;
+    gatt_rebuild_post();
+    return true;
 }
 
 /* GAP events for the modal central link. Kept separate from gap_event so the
@@ -724,6 +850,7 @@ static int central_gap_event(struct ble_gap_event* event, void* arg) {
 
 bool nimble_glue_central_start(const char* name, NimbleCentralCb cb, void* ctx) {
     if(!glue.synced || central.active) return false;
+    if(glue.gatt_rebuild_pending || glue.gatt_rebuilding) return false; /* table in flux */
     memset(&central, 0, sizeof(central));
     central.active = true;
     central.state = CENTRAL_SCANNING;

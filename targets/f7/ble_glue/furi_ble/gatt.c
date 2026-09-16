@@ -1,9 +1,14 @@
 #include "gatt.h"
 #include <gatt_host_shim.h>
+#include <ble_dispatch.h>
+#include <dyn_gatt.h>
+#include <nimble_glue.h>
 #include "event_dispatcher.h"
 #include <ble/ble.h>
+#include <interface/patterns/ble_thread/tl/tl.h>
 
 #include <furi.h>
+#include <stddef.h>
 
 #define TAG "GattChar"
 
@@ -31,12 +36,171 @@ static struct {
     uint16_t report_ref;
 } s_shim_refs[GATT_SHIM_REF_MAX];
 
+/* ---- Dynamic services under the shim (TASK-632) ----------------------------
+ * Services the resident NimBLE host already serves statically (HID, Battery,
+ * Device Information) keep the legacy mapping above: synthetic handles plus
+ * on_update. Any other service a caller adds through ble_gatt_service_add
+ * becomes a real NimBLE GATT service via dyn_gatt, and goes live when
+ * ble_gatt_host_shim_commit() rebuilds the table. Writes, CCCD changes and
+ * indication confirmations are turned back into the ACI vendor events stock
+ * service code already parses (ACI_GATT_ATTRIBUTE_MODIFIED /
+ * ACI_GATT_SERVER_CONFIRMATION) and delivered through ble_event_dispatcher on
+ * the BLE dispatch thread. */
+
+#define GATT_DYN_SVC_MAX (DYN_GATT_MAX_SVCS)
+#define GATT_DYN_CHR_MAX (DYN_GATT_MAX_SVCS * DYN_GATT_MAX_CHRS_PER_SVC)
+
+static struct {
+    uint16_t handle; /* 0 = free */
+    int svc_id;
+} s_dyn_svcs[GATT_DYN_SVC_MAX];
+
+static struct {
+    BleGattCharacteristicInstance* inst; /* NULL = free */
+    int chr_id;
+} s_dyn_chrs[GATT_DYN_CHR_MAX];
+
+/* Raw layout of a vendor event as hci_uart_pckt -> hci_event_pckt ->
+ * evt_blecore_aci -> payload, so the handlers' casts line up. */
+_Static_assert(offsetof(hci_uart_pckt, data) == 1, "hci_uart_pckt layout");
+_Static_assert(offsetof(hci_event_pckt, data) == 2, "hci_event_pckt layout");
+_Static_assert(offsetof(evt_blecore_aci, data) == 2, "evt_blecore_aci layout");
+_Static_assert(offsetof(aci_gatt_attribute_modified_event_rp0, Attr_Data) == 8, "attr modified layout");
+#define GATT_ACI_EVT_HDR (5U)
+
+static bool gatt_service_is_nimble_static(uint8_t uuid_type, const Service_UUID_t* uuid) {
+    if(uuid_type != UUID_TYPE_16) return false;
+    uint16_t u = uuid->Service_UUID_16;
+    return u == 0x1812 /* HID */ || u == 0x180F /* Battery */ || u == 0x180A /* DIS */;
+}
+
+static int gatt_dyn_svc_find(uint16_t svc_handle) {
+    int id = -1;
+    FURI_CRITICAL_ENTER();
+    for(size_t i = 0; i < GATT_DYN_SVC_MAX; i++) {
+        if(s_dyn_svcs[i].handle && s_dyn_svcs[i].handle == svc_handle) {
+            id = s_dyn_svcs[i].svc_id;
+            break;
+        }
+    }
+    FURI_CRITICAL_EXIT();
+    return id;
+}
+
+static int gatt_dyn_chr_find(const BleGattCharacteristicInstance* inst) {
+    int id = -1;
+    FURI_CRITICAL_ENTER();
+    for(size_t i = 0; i < GATT_DYN_CHR_MAX; i++) {
+        if(s_dyn_chrs[i].inst == inst) {
+            id = s_dyn_chrs[i].chr_id;
+            break;
+        }
+    }
+    FURI_CRITICAL_EXIT();
+    return id;
+}
+
+static void gatt_dyn_deliver(void* blob) {
+    ble_event_dispatcher_process_event(blob);
+}
+
+/* Host thread: wrap an ACI vendor event payload and post it for delivery. */
+static void gatt_dyn_post_aci(uint16_t ecode, const uint8_t* payload, uint16_t len) {
+    uint8_t* b = malloc(GATT_ACI_EVT_HDR + len);
+    b[0] = HCI_EVENT_PKT_TYPE;
+    b[1] = HCI_VENDOR_SPECIFIC_DEBUG_EVT_CODE;
+    b[2] = (uint8_t)MIN(255U, 2U + len); /* informational; handlers read lengths */
+    b[3] = (uint8_t)(ecode & 0xFF);
+    b[4] = (uint8_t)(ecode >> 8);
+    if(len) memcpy(b + GATT_ACI_EVT_HDR, payload, len);
+    ble_dispatch_post(gatt_dyn_deliver, b);
+}
+
+static void gatt_dyn_on_write(
+    int chr_id,
+    DynGattWriteKind kind,
+    uint16_t conn_handle,
+    uint16_t attr_handle,
+    const uint8_t* data,
+    uint16_t len,
+    void* ctx) {
+    UNUSED(chr_id);
+    UNUSED(kind);
+    UNUSED(ctx);
+    /* aci_gatt_attribute_modified_event_rp0: Connection_Handle, Attr_Handle,
+     * Offset, Attr_Data_Length, Attr_Data[] (little-endian). */
+    uint8_t* p = malloc(8U + len);
+    p[0] = (uint8_t)conn_handle;
+    p[1] = (uint8_t)(conn_handle >> 8);
+    p[2] = (uint8_t)attr_handle;
+    p[3] = (uint8_t)(attr_handle >> 8);
+    p[4] = 0;
+    p[5] = 0;
+    p[6] = (uint8_t)len;
+    p[7] = (uint8_t)(len >> 8);
+    if(len) memcpy(p + 8, data, len);
+    gatt_dyn_post_aci(ACI_GATT_ATTRIBUTE_MODIFIED_VSEVT_CODE, p, 8U + len);
+    free(p);
+}
+
+static void gatt_dyn_on_indicate_done(int chr_id, uint16_t conn_handle, void* ctx) {
+    UNUSED(chr_id);
+    UNUSED(ctx);
+    uint8_t p[2] = {(uint8_t)conn_handle, (uint8_t)(conn_handle >> 8)};
+    gatt_dyn_post_aci(ACI_GATT_SERVER_CONFIRMATION_VSEVT_CODE, p, sizeof(p));
+}
+
+/* Host thread, after a rebuild: give each instance its real handles so stock
+ * code comparing Attr_Handle to handle + 1 / + 2 matches. */
+static void gatt_dyn_on_committed(void* ctx) {
+    UNUSED(ctx);
+    for(size_t i = 0; i < GATT_DYN_CHR_MAX; i++) {
+        BleGattCharacteristicInstance* inst = s_dyn_chrs[i].inst;
+        if(!inst) continue;
+        uint16_t decl = 0, dsc = 0;
+        if(dyn_gatt_char_handles(s_dyn_chrs[i].chr_id, &decl, &dsc)) {
+            inst->handle = decl;
+            inst->descriptor_handle = dsc;
+        }
+    }
+}
+
+static const DynGattHooks gatt_dyn_hooks = {
+    .on_write = gatt_dyn_on_write,
+    .on_indicate_done = gatt_dyn_on_indicate_done,
+    .on_committed = gatt_dyn_on_committed,
+    .ctx = NULL,
+};
+
+static uint16_t gatt_dyn_flags(uint8_t props, uint8_t security) {
+    /* Broadcast..signed-write property bits match NimBLE's flag bits. */
+    uint16_t f = props & 0x7F;
+    if(security & ATTR_PERMISSION_AUTHEN_READ) f |= DYN_GATT_F_READ_ENC | DYN_GATT_F_READ_AUTHEN;
+    if(security & ATTR_PERMISSION_ENCRY_READ) f |= DYN_GATT_F_READ_ENC;
+    if(security & ATTR_PERMISSION_AUTHOR_READ) f |= DYN_GATT_F_READ_AUTHOR;
+    if(security & ATTR_PERMISSION_AUTHEN_WRITE)
+        f |= DYN_GATT_F_WRITE_ENC | DYN_GATT_F_WRITE_AUTHEN;
+    if(security & ATTR_PERMISSION_ENCRY_WRITE) f |= DYN_GATT_F_WRITE_ENC;
+    if(security & ATTR_PERMISSION_AUTHOR_WRITE) f |= DYN_GATT_F_WRITE_AUTHOR;
+    return f;
+}
+
+void ble_gatt_host_shim_commit(void) {
+    if(s_shim && dyn_gatt_dirty()) {
+        FURI_LOG_I(TAG, "shim: dynamic GATT services changed, rebuilding table");
+        nimble_glue_gatt_rebuild_request();
+    }
+}
+
 void ble_gatt_host_shim_set(const BleGattHostShim* shim) {
     if(shim) {
         /* Service code (e.g. ble_svc_hid_start in a FAP) registers an event
          * handler; the dispatcher init normally happens in gap_init, which never
          * runs without the CPU2 host. Idempotent. */
         ble_event_dispatcher_init();
+        dyn_gatt_set_hooks(&gatt_dyn_hooks);
+    } else {
+        dyn_gatt_set_hooks(NULL);
     }
     s_shim = shim;
 }
@@ -107,6 +271,78 @@ void ble_gatt_characteristic_init(
     } else if(char_descriptor->data_prop_type == FlipperGattCharacteristicDataCallback) {
         char_descriptor->data.callback.fn(
             char_descriptor->data.callback.context, NULL, &char_data_size);
+    }
+
+    if(s_shim && gatt_dyn_svc_find(svc_handle) >= 0) {
+        /* Dynamic service: define a real NimBLE characteristic. */
+        int svc_id = gatt_dyn_svc_find(svc_handle);
+        DynGattUuid uuid = {0};
+        if(char_descriptor->uuid_type == UUID_TYPE_16) {
+            uuid.type = 16;
+            uuid.u16 = char_descriptor->uuid.Char_UUID_16;
+        } else {
+            uuid.type = 128;
+            memcpy(uuid.u128, char_descriptor->uuid.Char_UUID_128, 16);
+        }
+
+        const uint8_t* init = NULL;
+        uint16_t init_len = 0;
+        if(char_descriptor->data_prop_type == FlipperGattCharacteristicDataFixed) {
+            init = char_descriptor->data.fixed.ptr;
+            init_len = char_descriptor->data.fixed.length;
+        }
+
+        DynGattUuid dsc_uuid = {0};
+        uint8_t dsc_value[DYN_GATT_DSC_VALUE_MAX];
+        uint8_t dsc_len = 0;
+        bool has_dsc = false;
+        if(char_descriptor->descriptor_params) {
+            const BleGattCharacteristicDescriptorParams* desc = char_descriptor->descriptor_params;
+            uint8_t const* desc_data = NULL;
+            uint16_t desc_data_len = 0;
+            bool release = desc->data_callback.fn(desc->data_callback.context, &desc_data, &desc_data_len);
+            if(desc->uuid_type == UUID_TYPE_16) {
+                dsc_uuid.type = 16;
+                dsc_uuid.u16 = desc->uuid.Char_UUID_16;
+            } else {
+                dsc_uuid.type = 128;
+                memcpy(dsc_uuid.u128, desc->uuid.Char_UUID_128, 16);
+            }
+            dsc_len = (uint8_t)MIN(desc_data_len, (uint16_t)sizeof(dsc_value));
+            if(desc_data && dsc_len) memcpy(dsc_value, desc_data, dsc_len);
+            if(release) free((void*)desc_data);
+            has_dsc = true;
+        }
+
+        int chr_id = dyn_gatt_char_add(
+            svc_id,
+            &uuid,
+            gatt_dyn_flags(char_descriptor->char_properties, char_descriptor->security_permissions),
+            char_data_size,
+            init,
+            init_len,
+            has_dsc ? &dsc_uuid : NULL,
+            dsc_value,
+            dsc_len);
+
+        /* Placeholder handles until the table is rebuilt (gatt_dyn_on_committed). */
+        char_instance->handle = ble_gatt_shim_alloc_handle();
+        char_instance->descriptor_handle = has_dsc ? ble_gatt_shim_alloc_handle() : 0;
+        if(chr_id < 0) {
+            FURI_LOG_E(TAG, "shim: dynamic %s char rejected", char_descriptor->name);
+            return;
+        }
+        FURI_CRITICAL_ENTER();
+        for(size_t i = 0; i < GATT_DYN_CHR_MAX; i++) {
+            if(!s_dyn_chrs[i].inst) {
+                s_dyn_chrs[i].inst = char_instance;
+                s_dyn_chrs[i].chr_id = chr_id;
+                break;
+            }
+        }
+        FURI_CRITICAL_EXIT();
+        FURI_LOG_D(TAG, "shim: dynamic %s char -> id %d", char_descriptor->name, chr_id);
+        return;
     }
 
     if(s_shim) {
@@ -188,7 +424,17 @@ void ble_gatt_characteristic_delete(
     uint16_t svc_handle,
     BleGattCharacteristicInstance* char_instance) {
     if(s_shim) {
-        ble_gatt_shim_ref_clear(char_instance->handle);
+        int chr_id = gatt_dyn_chr_find(char_instance);
+        if(chr_id >= 0) {
+            dyn_gatt_char_remove(chr_id); /* goes away on the next commit */
+            FURI_CRITICAL_ENTER();
+            for(size_t i = 0; i < GATT_DYN_CHR_MAX; i++) {
+                if(s_dyn_chrs[i].inst == char_instance) s_dyn_chrs[i].inst = NULL;
+            }
+            FURI_CRITICAL_EXIT();
+        } else {
+            ble_gatt_shim_ref_clear(char_instance->handle);
+        }
         free((void*)char_instance->characteristic);
         return;
     }
@@ -225,6 +471,17 @@ bool ble_gatt_characteristic_update(
             context = source;
         }
         release_data = char_descriptor->data.callback.fn(context, &char_data, &char_data_size);
+    }
+
+    int dyn_chr_id = s_shim ? gatt_dyn_chr_find(char_instance) : -1;
+    if(dyn_chr_id >= 0) {
+        /* Dynamic service: store the value and notify/indicate subscribers.
+         * Stock return convention: false means success. */
+        bool ok = dyn_gatt_char_set_value(dyn_chr_id, char_data, char_data_size);
+        if(release_data) {
+            free((void*)char_data);
+        }
+        return !ok;
     }
 
     if(s_shim) {
@@ -278,6 +535,38 @@ bool ble_gatt_service_add(
     uint16_t* Service_Handle) {
     if(s_shim) {
         *Service_Handle = ble_gatt_shim_alloc_handle();
+        if(gatt_service_is_nimble_static(Service_UUID_Type, Service_UUID)) {
+            return true; /* legacy mapping: NimBLE serves this statically */
+        }
+        UNUSED(Max_Attribute_Records);
+        DynGattUuid uuid = {0};
+        if(Service_UUID_Type == UUID_TYPE_16) {
+            uuid.type = 16;
+            uuid.u16 = Service_UUID->Service_UUID_16;
+        } else {
+            uuid.type = 128;
+            memcpy(uuid.u128, Service_UUID->Service_UUID_128, 16);
+        }
+        int svc_id = dyn_gatt_service_add(&uuid, Service_Type != SECONDARY_SERVICE);
+        if(svc_id < 0) {
+            FURI_LOG_E(TAG, "shim: dynamic service rejected (no slot)");
+            return false;
+        }
+        bool stored = false;
+        FURI_CRITICAL_ENTER();
+        for(size_t i = 0; i < GATT_DYN_SVC_MAX; i++) {
+            if(!s_dyn_svcs[i].handle) {
+                s_dyn_svcs[i].handle = *Service_Handle;
+                s_dyn_svcs[i].svc_id = svc_id;
+                stored = true;
+                break;
+            }
+        }
+        FURI_CRITICAL_EXIT();
+        if(!stored) {
+            dyn_gatt_service_remove(svc_id);
+            return false;
+        }
         return true;
     }
 
@@ -293,6 +582,20 @@ bool ble_gatt_service_add(
 
 bool ble_gatt_service_delete(uint16_t svc_handle) {
     if(s_shim) {
+        int svc_id = gatt_dyn_svc_find(svc_handle);
+        if(svc_id >= 0) {
+            dyn_gatt_service_remove(svc_id); /* goes away on the next commit */
+            FURI_CRITICAL_ENTER();
+            for(size_t i = 0; i < GATT_DYN_SVC_MAX; i++) {
+                if(s_dyn_svcs[i].handle == svc_handle) s_dyn_svcs[i].handle = 0;
+            }
+            for(size_t i = 0; i < GATT_DYN_CHR_MAX; i++) {
+                if(s_dyn_chrs[i].inst &&
+                   s_dyn_chrs[i].chr_id / DYN_GATT_MAX_CHRS_PER_SVC == svc_id)
+                    s_dyn_chrs[i].inst = NULL;
+            }
+            FURI_CRITICAL_EXIT();
+        }
         return true;
     }
 
