@@ -40,7 +40,6 @@
 #include "serial_gatt.h"
 #include "serial_store.h"
 #include "hid_gatt.h"
-#include "coc_glue.h"
 
 #define TAG "NimbleGlue"
 
@@ -323,10 +322,6 @@ static void on_sync(void) {
         glue.addr[2],
         glue.addr[1],
         glue.addr[0]);
-    /* Probe the controller's multi-role capability once (TASK-615). Diagnostic
-     * only; it does not change behavior. Its log tells whether a CoC central can
-     * run alongside the companion peripheral link. */
-    coc_probe_capabilities();
     start_advertise();
 }
 
