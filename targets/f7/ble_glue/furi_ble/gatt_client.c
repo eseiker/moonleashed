@@ -7,14 +7,17 @@
  * Moon-Firmware's ble_gatt_client_* recompiles against this unchanged.
  *
  * Notifications reach this module through the central link's GAP handler
- * (nimble_glue), which calls gattc_api_on_notify. The registered callback runs
- * on the NimBLE host thread; off-thread delivery is the furi_ble broker
- * foundation (TASK-631).
+ * (nimble_glue), which calls gattc_api_on_notify. Registered callbacks run on
+ * the BLE dispatch thread (ble_dispatch.h), never on the NimBLE host thread; the
+ * discovered arrays and read/notify bytes are copied with each event. After
+ * set_callback(h, NULL, ...) or deinit returns, that callback is not invoked
+ * again.
  */
 
 #include "gatt_client.h"
 
 #include <gattc_glue.h>
+#include <ble_dispatch.h>
 #include <furi.h>
 #include <string.h>
 
@@ -30,8 +33,6 @@ typedef struct {
 } GattClientConnection;
 
 static GattClientConnection gc_connections[GATT_CLIENT_MAX_CONNECTIONS];
-static BleGattService gc_svcs[BLE_GATT_CLIENT_MAX_SERVICES];
-static BleGattCharacteristic gc_chrs[BLE_GATT_CLIENT_MAX_CHARS];
 
 static GattClientConnection* gc_find(uint16_t connection_handle) {
     for(int i = 0; i < GATT_CLIENT_MAX_CONNECTIONS; i++) {
@@ -72,85 +73,129 @@ static void gc_free(uint16_t connection_handle) {
     }
 }
 
-/* Translate a neutral core event into BleGattClientEvent and route it. */
+/* An event copied off the NimBLE host thread. Array/data pointers in `event`
+ * point into `payload`, so they stay valid for the whole callback. */
+typedef struct {
+    BleGattClientEvent event;
+    uint8_t payload[];
+} GattClientEventBlob;
+
+/* Dispatch thread: route to the callback registered for the connection now. */
+static void gc_deliver(void* blob) {
+    GattClientEventBlob* b = blob;
+    ble_dispatch_lock();
+    GattClientConnection* conn = gc_find(b->event.connection_handle);
+    if(conn && conn->callback) conn->callback(&b->event, conn->context);
+    ble_dispatch_unlock();
+}
+
+/* NimBLE host thread: translate, copy into one heap blob, post. */
 static void gc_dispatch(const GattcApiEvent* ev, void* context) {
     UNUSED(context);
-    GattClientConnection* conn = gc_find(ev->conn_handle);
-    if(!conn || !conn->callback) return;
+    uint8_t n = 0;
+    size_t extra = 0;
+    switch(ev->type) {
+    case GattcApiServicesDiscovered:
+        n = ev->count > BLE_GATT_CLIENT_MAX_SERVICES ? BLE_GATT_CLIENT_MAX_SERVICES : ev->count;
+        extra = n * sizeof(BleGattService);
+        break;
+    case GattcApiCharsDiscovered:
+        n = ev->count > BLE_GATT_CLIENT_MAX_CHARS ? BLE_GATT_CLIENT_MAX_CHARS : ev->count;
+        extra = n * sizeof(BleGattCharacteristic);
+        break;
+    case GattcApiReadComplete:
+    case GattcApiNotification:
+        extra = ev->data ? ev->data_len : 0;
+        break;
+    default:
+        break;
+    }
 
-    BleGattClientEvent out = {.connection_handle = ev->conn_handle};
+    GattClientEventBlob* b = malloc(sizeof(GattClientEventBlob) + extra);
+    memset(&b->event, 0, sizeof(b->event));
+    b->event.connection_handle = ev->conn_handle;
+
     switch(ev->type) {
     case GattcApiServicesDiscovered: {
-        uint8_t n = ev->count > BLE_GATT_CLIENT_MAX_SERVICES ? BLE_GATT_CLIENT_MAX_SERVICES :
-                                                               ev->count;
+        BleGattService* svcs = (BleGattService*)b->payload;
         for(uint8_t i = 0; i < n; i++) {
-            gc_svcs[i].uuid_type = ev->services[i].uuid_type;
-            gc_svcs[i].uuid_16 = ev->services[i].uuid_16;
-            memcpy(gc_svcs[i].uuid_128, ev->services[i].uuid_128, 16);
-            gc_svcs[i].start_handle = ev->services[i].start_handle;
-            gc_svcs[i].end_handle = ev->services[i].end_handle;
+            svcs[i].uuid_type = ev->services[i].uuid_type;
+            svcs[i].uuid_16 = ev->services[i].uuid_16;
+            memcpy(svcs[i].uuid_128, ev->services[i].uuid_128, 16);
+            svcs[i].start_handle = ev->services[i].start_handle;
+            svcs[i].end_handle = ev->services[i].end_handle;
         }
-        out.type = BleGattClientEventDiscoverComplete;
-        out.discover.services = gc_svcs;
-        out.discover.count = n;
+        b->event.type = BleGattClientEventDiscoverComplete;
+        b->event.discover.services = svcs;
+        b->event.discover.count = n;
         break;
     }
     case GattcApiCharsDiscovered: {
-        uint8_t n = ev->count > BLE_GATT_CLIENT_MAX_CHARS ? BLE_GATT_CLIENT_MAX_CHARS : ev->count;
+        BleGattCharacteristic* chrs = (BleGattCharacteristic*)b->payload;
         for(uint8_t i = 0; i < n; i++) {
-            gc_chrs[i].uuid_type = ev->chars[i].uuid_type;
-            gc_chrs[i].uuid_16 = ev->chars[i].uuid_16;
-            memcpy(gc_chrs[i].uuid_128, ev->chars[i].uuid_128, 16);
-            gc_chrs[i].decl_handle = ev->chars[i].decl_handle;
-            gc_chrs[i].value_handle = ev->chars[i].value_handle;
-            gc_chrs[i].properties = ev->chars[i].properties;
+            chrs[i].uuid_type = ev->chars[i].uuid_type;
+            chrs[i].uuid_16 = ev->chars[i].uuid_16;
+            memcpy(chrs[i].uuid_128, ev->chars[i].uuid_128, 16);
+            chrs[i].decl_handle = ev->chars[i].decl_handle;
+            chrs[i].value_handle = ev->chars[i].value_handle;
+            chrs[i].properties = ev->chars[i].properties;
         }
-        out.type = BleGattClientEventCharDiscoverComplete;
-        out.char_discover.chars = gc_chrs;
-        out.char_discover.count = n;
+        b->event.type = BleGattClientEventCharDiscoverComplete;
+        b->event.char_discover.chars = chrs;
+        b->event.char_discover.count = n;
         break;
     }
     case GattcApiReadComplete:
-        out.type = BleGattClientEventReadComplete;
-        out.read.data = ev->data;
-        out.read.data_len = ev->data_len;
-        out.read.value_handle = ev->value_handle;
+        b->event.type = BleGattClientEventReadComplete;
+        if(extra) memcpy(b->payload, ev->data, extra);
+        b->event.read.data = b->payload;
+        b->event.read.data_len = extra;
+        b->event.read.value_handle = ev->value_handle;
         break;
     case GattcApiWriteComplete:
-        out.type = BleGattClientEventWriteComplete;
+        b->event.type = BleGattClientEventWriteComplete;
         break;
     case GattcApiNotification:
-        out.type = BleGattClientEventNotification;
-        out.notification.data = ev->data;
-        out.notification.data_len = ev->data_len;
-        out.notification.value_handle = ev->value_handle;
-        out.notification.offset = 0;
+        b->event.type = BleGattClientEventNotification;
+        if(extra) memcpy(b->payload, ev->data, extra);
+        b->event.notification.data = b->payload;
+        b->event.notification.data_len = extra;
+        b->event.notification.value_handle = ev->value_handle;
+        b->event.notification.offset = 0;
         break;
     case GattcApiError:
-        out.type = BleGattClientEventError;
-        out.error.error_code = ev->error_code;
+        b->event.type = BleGattClientEventError;
+        b->event.error.error_code = ev->error_code;
         break;
     default:
+        free(b);
         return;
     }
-    conn->callback(&out, conn->context);
+    ble_dispatch_post(gc_deliver, b);
 }
 
 void ble_gatt_client_init(void) {
+    ble_dispatch_init();
+    ble_dispatch_lock();
     memset(gc_connections, 0, sizeof(gc_connections));
+    ble_dispatch_unlock();
     gattc_api_init(gc_dispatch, NULL);
     FURI_LOG_I(TAG, "GATT client initialized (NimBLE-backed)");
 }
 
 void ble_gatt_client_deinit(void) {
     gattc_api_deinit();
+    /* After this returns no FAP callback runs: queued events find no slot. */
+    ble_dispatch_lock();
     memset(gc_connections, 0, sizeof(gc_connections));
+    ble_dispatch_unlock();
 }
 
 void ble_gatt_client_set_callback(
     uint16_t connection_handle,
     BleGattClientCallback callback,
     void* context) {
+    ble_dispatch_lock();
     if(callback) {
         GattClientConnection* conn = gc_alloc(connection_handle);
         if(conn) {
@@ -160,6 +205,7 @@ void ble_gatt_client_set_callback(
     } else {
         gc_free(connection_handle);
     }
+    ble_dispatch_unlock();
 }
 
 bool ble_gatt_client_discover_services(uint16_t connection_handle) {

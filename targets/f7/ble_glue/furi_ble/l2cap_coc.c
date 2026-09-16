@@ -6,14 +6,17 @@
  * BleL2capCocEvent the FAP-facing API defines. A FAP written for Moon-Firmware's
  * ble_l2cap_coc_* recompiles against this unchanged (TASK-621).
  *
- * The registered callback currently runs on the NimBLE host thread (the neutral
- * core emits synchronously). Off-thread delivery is the furi_ble broker
- * foundation (TASK-631); the signatures here do not change when that lands.
+ * Registered callbacks run on the BLE dispatch thread (ble_dispatch.h), never on
+ * the NimBLE host thread: each event is copied into a heap blob, including the
+ * SDU bytes, so the callback's data pointer stays valid for the whole call.
+ * After ble_l2cap_coc_set_callback(h, NULL, ...) or ble_l2cap_coc_deinit()
+ * returns, that callback is not invoked again.
  */
 
 #include "l2cap_coc.h"
 
 #include <coc_glue.h>
+#include <ble_dispatch.h>
 #include <furi.h>
 #include <string.h>
 
@@ -75,45 +78,65 @@ static void coc_free_connection(uint16_t connection_handle) {
     }
 }
 
-/* Translate a neutral core event into the FAP-facing BleL2capCocEvent and route
- * it to the callback registered for that connection. */
+/* An event copied off the NimBLE host thread; data points into `payload`. */
+typedef struct {
+    BleL2capCocEvent event;
+    uint8_t payload[];
+} CocEventBlob;
+
+/* Dispatch thread: route to the callback registered for the connection now. */
+static void coc_deliver(void* blob) {
+    CocEventBlob* b = blob;
+    ble_dispatch_lock();
+    L2capCocConnection* conn = coc_find_connection(b->event.connection_handle);
+    if(conn && conn->callback) conn->callback(&b->event, conn->context);
+    ble_dispatch_unlock();
+}
+
+/* NimBLE host thread: translate the neutral core event into BleL2capCocEvent,
+ * copy it (with any SDU bytes) into a heap blob and hand it to the dispatch
+ * thread. Never runs FAP code here. */
 static void coc_dispatch(const CocApiEvent* ev, void* context) {
     UNUSED(context);
-    L2capCocConnection* conn = coc_find_connection(ev->conn_handle);
-    if(!conn || !conn->callback) return;
+    uint16_t extra = (ev->type == CocApiData && ev->data) ? ev->data_len : 0;
+    CocEventBlob* b = malloc(sizeof(CocEventBlob) + extra);
+    memset(&b->event, 0, sizeof(b->event));
+    b->event.channel_index = ev->channel_index;
+    b->event.connection_handle = ev->conn_handle;
 
-    BleL2capCocEvent out = {
-        .channel_index = ev->channel_index,
-        .connection_handle = ev->conn_handle,
-    };
     switch(ev->type) {
     case CocApiConnected:
-        out.type = BleL2capCocEventConnected;
-        out.connected.peer_mtu = ev->peer_mtu;
+        b->event.type = BleL2capCocEventConnected;
+        b->event.connected.peer_mtu = ev->peer_mtu;
         break;
     case CocApiDisconnected:
-        out.type = BleL2capCocEventDisconnected;
+        b->event.type = BleL2capCocEventDisconnected;
         break;
     case CocApiData:
-        out.type = BleL2capCocEventDataReceived;
-        out.data.data = ev->data;
-        out.data.data_len = ev->data_len;
+        b->event.type = BleL2capCocEventDataReceived;
+        if(extra) memcpy(b->payload, ev->data, extra);
+        b->event.data.data = b->payload;
+        b->event.data.data_len = extra;
         break;
     case CocApiTxUnstalled:
-        out.type = BleL2capCocEventTxDone;
+        b->event.type = BleL2capCocEventTxDone;
         break;
     case CocApiError:
-        out.type = BleL2capCocEventError;
-        out.error.code = ev->error_code;
+        b->event.type = BleL2capCocEventError;
+        b->event.error.code = ev->error_code;
         break;
     default:
+        free(b);
         return;
     }
-    conn->callback(&out, conn->context);
+    ble_dispatch_post(coc_deliver, b);
 }
 
 void ble_l2cap_coc_init(void) {
+    ble_dispatch_init();
+    ble_dispatch_lock();
     memset(coc_connections, 0, sizeof(coc_connections));
+    ble_dispatch_unlock();
     coc_api_init(coc_dispatch, NULL);
     coc_started = true;
     FURI_LOG_I(TAG, "L2CAP CoC initialized (NimBLE-backed)");
@@ -121,7 +144,10 @@ void ble_l2cap_coc_init(void) {
 
 void ble_l2cap_coc_deinit(void) {
     coc_api_deinit();
+    /* After this returns no FAP callback runs: queued events find no slot. */
+    ble_dispatch_lock();
     memset(coc_connections, 0, sizeof(coc_connections));
+    ble_dispatch_unlock();
     coc_started = false;
 }
 
@@ -129,6 +155,7 @@ void ble_l2cap_coc_set_callback(
     uint16_t connection_handle,
     BleL2capCocCallback callback,
     void* context) {
+    ble_dispatch_lock();
     if(callback) {
         L2capCocConnection* conn = coc_alloc_connection(connection_handle);
         if(conn) {
@@ -138,6 +165,7 @@ void ble_l2cap_coc_set_callback(
     } else {
         coc_free_connection(connection_handle);
     }
+    ble_dispatch_unlock();
 }
 
 bool ble_l2cap_coc_connect(

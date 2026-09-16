@@ -10,6 +10,7 @@
 #include <assets_icons.h>
 #include <profiles/serial_profile.h>
 #include <gatt_host_shim.h>
+#include <ble_dispatch.h>
 #include <nimble_glue.h>
 
 #define TAG "BtSrv"
@@ -736,6 +737,11 @@ static bool bt_nimble_bringup(Bt* bt) {
      * cleanly and its reports are dropped by the glue, instead of the app
      * issuing ACI commands into a controller NimBLE owns. */
     ble_gatt_host_shim_set(&bt_nimble_gatt_shim);
+
+    /* Start the BLE dispatch thread now so FAP callbacks (CoC, GATT client, GATT
+     * server events) are delivered off the NimBLE host thread from the first
+     * event on (TASK-631). The furi_ble adapters also start it lazily. */
+    ble_dispatch_init();
 
     bt->nimble_active = true;
     bt->nimble_profile_started = false;
