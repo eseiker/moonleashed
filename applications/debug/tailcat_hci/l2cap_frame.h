@@ -65,38 +65,58 @@ _Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must
  * down is reported by FIXED_LINK as usual. */
 #define L2F_LINK_DISCONNECT 0x40 /* [conn:2][reason:1] */
 
+/* GATT client (TASK-633): drive the Flipper as a central against a peer's GATT
+ * server. Get a link first with CONNECT; a psm of 0 there connects without
+ * opening a CoC, which is what these frames want. uuid_type follows the
+ * ble_gatt_client_* API, where 1 is a 16-bit UUID and 2 a 128-bit one. */
+#define L2F_GATTC_DISCOVER  0x50 /* [conn:2]                                  services   */
+#define L2F_GATTC_CHARS     0x51 /* [conn:2][start:2][end:2]                  chars      */
+#define L2F_GATTC_READ      0x52 /* [conn:2][value_handle:2]                             */
+#define L2F_GATTC_WRITE     0x53 /* [conn:2][value_handle:2][data...]                    */
+#define L2F_GATTC_SUBSCRIBE 0x54 /* [conn:2][value_handle:2][enable:1]                   */
+#define L2F_GATTC_MTU       0x55 /* [conn:2]                                  exchange   */
+
 /* FAP -> Host */
 #define L2F_CONNECTED \
     0x81 /* [channel:1][conn:2][peer_mtu:2] — peer_mtu is the
                                 * peer's CoC SDU MTU; cap SENDs at min(peer_mtu,
                                 * L2F_COC_MTU). Appended field: readers of the old
                                 * 3-byte payload keep working. */
-#define L2F_DATA          0x82 /* [channel:1][data...] */
-#define L2F_DISCONNECTED  0x83 /* [channel:1]          */
-#define L2F_ERROR         0x84 /* [code:2]             */
-#define L2F_FIXED_DATA    0x90 /* [conn:2][cid:2][pdu...] inbound fixed-CID PDU */
+#define L2F_DATA             0x82 /* [channel:1][data...] */
+#define L2F_DISCONNECTED     0x83 /* [channel:1]          */
+#define L2F_ERROR            0x84 /* [code:2]             */
+#define L2F_FIXED_DATA       0x90 /* [conn:2][cid:2][pdu...] inbound fixed-CID PDU */
 /* FIXED_LINK: a BLE link came up (up=1) or went down (up=0). Sent for every
  * link while the bridge runs, and again for each existing link after a
  * FIXED_REGISTER, so the host learns the conn to FIXED_SEND on before the peer
  * speaks (Magnet's VersionInfo goes first). An up report can repeat. */
-#define L2F_FIXED_LINK    0x91 /* [conn:2][up:1] */
+#define L2F_FIXED_LINK       0x91 /* [conn:2][up:1] */
 /* SEC_EVENT payload: [kind:1][conn:2][status:2][passkey:4][flags:1][key_size:1].
  * kind is 0 passkey display, 1 passkey request, 2 numeric comparison,
  * 3 OOB request, 4 encryption changed, 5 repeat pairing.
  * flags is bit0 encrypted, bit1 authenticated, bit2 bonded. */
-#define L2F_SEC_EVENT     0xA0
-#define L2F_GATT_ID       0xB0 /* [kind:1][id:1][decl:2][value:2] kind 0 service, 1 characteristic */
+#define L2F_SEC_EVENT        0xA0
+#define L2F_GATT_ID          0xB0 /* [kind:1][id:1][decl:2][value:2] kind 0 service, 1 characteristic */
 /* GATT_WRITE payload: [chr_id:1][conn:2][kind:1][data...], where kind 0 is a
  * value write and kind 1 a CCCD change with data [notify:1][indicate:1]. */
-#define L2F_GATT_WRITE    0xB1
-#define L2F_GATT_READY    0xB2 /* []  the attribute table was rebuilt; handles are valid */
+#define L2F_GATT_WRITE       0xB1
+#define L2F_GATT_READY       0xB2 /* []  the attribute table was rebuilt; handles are valid */
 /* Answer to LINK_DISCONNECT: status 0 accepted, 1 no such link (already gone),
  * 2 refused. It reports only that the request was taken, not that the link is
  * down; FIXED_LINK reports that. */
-#define L2F_LINK_STATUS   0xC0 /* [conn:2][status:1] */
+#define L2F_LINK_STATUS      0xC0 /* [conn:2][status:1] */
 /* Answer to SEC_OOB_GENERATE: our Secure Connections OOB values, to carry to
  * the peer out of band. An empty payload means the generator failed. */
-#define L2F_SEC_OOB_LOCAL 0xA1 /* [random:16][confirm:16] */
+#define L2F_SEC_OOB_LOCAL    0xA1 /* [random:16][confirm:16] */
+/* GATT client results (TASK-633). SERVICE and CHAR arrive one per entry, then
+ * DONE closes the run: what is 0 for services and 1 for characteristics. */
+#define L2F_GATTC_SERVICE    0xD0 /* [conn:2][uuid_type:1][uuid:2|16][start:2][end:2]     */
+#define L2F_GATTC_CHAR       0xD1 /* [conn:2][uuid_type:1][uuid:2|16][decl:2][value:2][props:1] */
+#define L2F_GATTC_DONE       0xD2 /* [conn:2][what:1]                                     */
+#define L2F_GATTC_READ_DATA  0xD3 /* [conn:2][value_handle:2][data...]                    */
+#define L2F_GATTC_NOTIFY     0xD4 /* [conn:2][value_handle:2][data...]                    */
+#define L2F_GATTC_WRITE_DONE 0xD5 /* [conn:2][value_handle:2]                             */
+#define L2F_GATTC_ERROR      0xD6 /* [conn:2][code:1]                                     */
 
 typedef struct {
     uint8_t type;

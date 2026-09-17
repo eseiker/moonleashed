@@ -18,6 +18,7 @@
 #include <furi_ble/security.h>
 #include <furi_ble/gatt_server.h>
 #include <furi_ble/link.h>
+#include <furi_ble/gatt_client.h>
 #include <furi_ble/adv.h>
 #include <furi_ble/furi_ble_session.h>
 #include "l2cap_frame.h"
@@ -248,6 +249,89 @@ static uint16_t l2_read_uuid(const uint8_t* p, uint16_t avail, BleGattServerUuid
     return 0;
 }
 
+/* Append a GATT client UUID as [uuid_type:1][uuid:2 or 16]. Returns the length
+ * written. The type follows the ble_gatt_client_* API: 1 is 16-bit, 2 is
+ * 128-bit. */
+static uint16_t
+    l2_put_gattc_uuid(uint8_t* p, uint8_t uuid_type, uint16_t uuid16, const uint8_t* uuid128) {
+    p[0] = uuid_type;
+    if(uuid_type == 1) {
+        p[1] = (uint8_t)(uuid16 & 0xFF);
+        p[2] = (uint8_t)(uuid16 >> 8);
+        return 3;
+    }
+    memcpy(p + 1, uuid128, 16);
+    return 17;
+}
+
+/* GATT client results (dispatch thread). */
+static void on_gattc(BleGattClientEvent* ev, void* context) {
+    L2App* app = context;
+    static uint8_t buf[8 + L2F_PAYLOAD_MAX];
+    uint16_t conn = ev->connection_handle;
+    buf[0] = (uint8_t)(conn & 0xFF);
+    buf[1] = (uint8_t)(conn >> 8);
+
+    switch(ev->type) {
+    case BleGattClientEventDiscoverComplete:
+        for(uint8_t i = 0; i < ev->discover.count; i++) {
+            const BleGattService* s = &ev->discover.services[i];
+            uint16_t n = 2;
+            n += l2_put_gattc_uuid(buf + n, s->uuid_type, s->uuid_16, s->uuid_128);
+            buf[n++] = (uint8_t)(s->start_handle & 0xFF);
+            buf[n++] = (uint8_t)(s->start_handle >> 8);
+            buf[n++] = (uint8_t)(s->end_handle & 0xFF);
+            buf[n++] = (uint8_t)(s->end_handle >> 8);
+            l2_emit(app, L2F_GATTC_SERVICE, buf, n);
+        }
+        buf[2] = 0; /* services */
+        l2_emit(app, L2F_GATTC_DONE, buf, 3);
+        break;
+    case BleGattClientEventCharDiscoverComplete:
+        for(uint8_t i = 0; i < ev->char_discover.count; i++) {
+            const BleGattCharacteristic* c = &ev->char_discover.chars[i];
+            uint16_t n = 2;
+            n += l2_put_gattc_uuid(buf + n, c->uuid_type, c->uuid_16, c->uuid_128);
+            buf[n++] = (uint8_t)(c->decl_handle & 0xFF);
+            buf[n++] = (uint8_t)(c->decl_handle >> 8);
+            buf[n++] = (uint8_t)(c->value_handle & 0xFF);
+            buf[n++] = (uint8_t)(c->value_handle >> 8);
+            buf[n++] = c->properties;
+            l2_emit(app, L2F_GATTC_CHAR, buf, n);
+        }
+        buf[2] = 1; /* characteristics */
+        l2_emit(app, L2F_GATTC_DONE, buf, 3);
+        break;
+    case BleGattClientEventReadComplete: {
+        uint16_t n = ev->read.data_len;
+        if(n > L2F_PAYLOAD_MAX - 4) n = L2F_PAYLOAD_MAX - 4;
+        buf[2] = (uint8_t)(ev->read.value_handle & 0xFF);
+        buf[3] = (uint8_t)(ev->read.value_handle >> 8);
+        if(n) memcpy(buf + 4, ev->read.data, n);
+        l2_emit(app, L2F_GATTC_READ_DATA, buf, n + 4);
+    } break;
+    case BleGattClientEventNotification: {
+        uint16_t n = ev->notification.data_len;
+        if(n > L2F_PAYLOAD_MAX - 4) n = L2F_PAYLOAD_MAX - 4;
+        buf[2] = (uint8_t)(ev->notification.value_handle & 0xFF);
+        buf[3] = (uint8_t)(ev->notification.value_handle >> 8);
+        if(n) memcpy(buf + 4, ev->notification.data, n);
+        app->rx_sdus++;
+        l2_emit(app, L2F_GATTC_NOTIFY, buf, n + 4);
+    } break;
+    case BleGattClientEventWriteComplete:
+        buf[2] = 0;
+        buf[3] = 0;
+        l2_emit(app, L2F_GATTC_WRITE_DONE, buf, 4);
+        break;
+    case BleGattClientEventError:
+    default:
+        buf[2] = ev->error.error_code;
+        l2_emit(app, L2F_GATTC_ERROR, buf, 3);
+        break;
+    }
+}
+
 /* Take pairing over on the first SEC_* frame, not at startup: a bridge session
  * that never pairs must leave the companion's pairing alone. */
 static void l2_security_claim(L2App* app) {
@@ -407,6 +491,56 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
         app->chr_ids[app->chr_count++] = chr;
         l2_emit_char_id(app, chr);
     } break;
+    case L2F_GATTC_DISCOVER:
+        if(f->len >= 2) {
+            uint16_t conn = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+            if(!ble_gatt_client_discover_services(conn)) l2_error(app, 0x000A);
+        }
+        break;
+    case L2F_GATTC_CHARS:
+        /* [conn:2][start:2][end:2] */
+        if(f->len >= 6) {
+            uint16_t conn = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+            BleGattService svc = {
+                .start_handle = (uint16_t)f->data[2] | ((uint16_t)f->data[3] << 8),
+                .end_handle = (uint16_t)f->data[4] | ((uint16_t)f->data[5] << 8),
+            };
+            if(!ble_gatt_client_discover_characteristics(conn, &svc)) l2_error(app, 0x000A);
+        }
+        break;
+    case L2F_GATTC_READ:
+        if(f->len >= 4) {
+            uint16_t conn = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+            uint16_t handle = (uint16_t)f->data[2] | ((uint16_t)f->data[3] << 8);
+            if(!ble_gatt_client_read(conn, handle)) l2_error(app, 0x000A);
+        }
+        break;
+    case L2F_GATTC_WRITE:
+        /* [conn:2][value_handle:2][data...] */
+        if(f->len >= 4) {
+            uint16_t conn = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+            uint16_t handle = (uint16_t)f->data[2] | ((uint16_t)f->data[3] << 8);
+            if(ble_gatt_client_write(conn, handle, f->data + 4, f->len - 4)) {
+                app->tx_sdus++;
+            } else {
+                l2_error(app, 0x000A);
+            }
+        }
+        break;
+    case L2F_GATTC_SUBSCRIBE:
+        if(f->len >= 5) {
+            uint16_t conn = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+            uint16_t handle = (uint16_t)f->data[2] | ((uint16_t)f->data[3] << 8);
+            if(!ble_gatt_client_subscribe_notifications(conn, handle, f->data[4] != 0))
+                l2_error(app, 0x000A);
+        }
+        break;
+    case L2F_GATTC_MTU:
+        if(f->len >= 2) {
+            uint16_t conn = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
+            if(!ble_gatt_client_exchange_mtu(conn)) l2_error(app, 0x000A);
+        }
+        break;
     case L2F_LINK_DISCONNECT:
         /* [conn:2][reason:1]: drop a link the host no longer wants. */
         if(f->len >= 3) {
@@ -492,6 +626,13 @@ static void l2_poll_central(L2App* app) {
     if(!furi_ble_session_get_event(app->central, &ev, 0)) return;
     switch(ev.type) {
     case FuriBleEventCentralConnected:
+        /* A psm of 0 means the host only wanted the link, to drive GATT over it
+         * with the GATTC_* frames (TASK-633). FIXED_LINK already reported the
+         * connection handle, so there is nothing more to do here. */
+        if(app->central_psm == 0) {
+            app->central_coc_opened = true; /* no CoC to lose, so no link-lost error */
+            break;
+        }
         /* Link is up: open the CoC as the client. Its Connected/Data events
          * then flow through on_coc like the server path. */
         if(!ble_l2cap_coc_connect(
@@ -626,6 +767,9 @@ int32_t tailcat_l2cap_app(void* context) {
      * no services, so the companion's GATT table is untouched until it does. */
     ble_gatt_server_init();
     ble_gatt_server_set_callback(on_gatt_server, app);
+    /* GATT client, for when the host drives the Flipper as a central. */
+    ble_gatt_client_init();
+    ble_gatt_client_set_callback(0, on_gattc, app); /* 0: any connection */
 
     Gui* gui = furi_record_open(RECORD_GUI);
     ViewPort* viewport = view_port_alloc();
@@ -677,6 +821,8 @@ int32_t tailcat_l2cap_app(void* context) {
         ble_security_set_callback(NULL, NULL);
         ble_security_deinit(); /* give pairing back to the firmware */
     }
+    ble_gatt_client_set_callback(0, NULL, NULL);
+    ble_gatt_client_deinit();
     ble_gatt_server_set_callback(NULL, NULL);
     ble_gatt_server_deinit(); /* removes our services and rebuilds the table */
     ble_l2cap_fixed_set_link_callback(NULL, NULL);

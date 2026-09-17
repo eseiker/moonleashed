@@ -162,12 +162,24 @@ static void maybe_advertise(void) {
 static int gap_event(struct ble_gap_event* event, void* arg) {
     UNUSED(arg);
     switch(event->type) {
-    case BLE_GAP_EVENT_DISC:
+    case BLE_GAP_EVENT_DISC: {
         glue.scan_count++;
         memcpy(glue.last_addr, event->disc.addr.val, 6);
+        /* Log any advertised name: matching a peer by name is how a modal
+         * central session finds its peer, so a missing name is the first thing
+         * to check when a connect never happens. */
+        struct ble_hs_adv_fields logf;
+        char advname[32] = "";
+        if(ble_hs_adv_parse_fields(&logf, event->disc.data, event->disc.length_data) == 0 &&
+           logf.name != NULL) {
+            uint8_t n = logf.name_len;
+            if(n > sizeof(advname) - 1) n = sizeof(advname) - 1;
+            memcpy(advname, logf.name, n);
+            advname[n] = '\0';
+        }
         FURI_LOG_I(
             TAG,
-            "Scan #%lu: %02X:%02X:%02X:%02X:%02X:%02X type=%u rssi=%d",
+            "Scan #%lu: %02X:%02X:%02X:%02X:%02X:%02X type=%u rssi=%d evt=%u name='%s'",
             glue.scan_count,
             event->disc.addr.val[5],
             event->disc.addr.val[4],
@@ -176,7 +188,9 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             event->disc.addr.val[1],
             event->disc.addr.val[0],
             event->disc.addr.type,
-            event->disc.rssi);
+            event->disc.rssi,
+            event->disc.event_type,
+            advname);
         /* During a modal central session, match the peer by advertised name,
          * then stop scanning and connect to it as central. */
         if(central.active && central.state == CENTRAL_SCANNING) {
@@ -198,6 +212,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             }
         }
         break;
+    }
 
     case BLE_GAP_EVENT_DISC_COMPLETE:
         FURI_LOG_I(TAG, "Scan complete (reason %d), found %lu", event->disc_complete.reason, glue.scan_count);
