@@ -559,6 +559,13 @@ static void bt_close_connection(Bt* bt) {
 }
 
 static void bt_apply_settings(Bt* bt) {
+    if(bt->nimble_active) {
+        /* The stock advertising calls drive the CPU2 GAP, which does nothing
+         * under the resident NimBLE host, so the Bluetooth setting had no
+         * effect at all (TASK-702). */
+        nimble_glue_set_advertising_enabled(bt->bt_settings.enabled);
+        return;
+    }
     if(bt->bt_settings.enabled) {
         furi_hal_bt_start_advertising();
     } else {
@@ -809,6 +816,10 @@ int32_t bt_srv(void* p) {
         } else if(!bt_nimble_bringup(bt)) {
             FURI_LOG_E(TAG, "NimBLE host bring-up failed; BLE unavailable");
             bt->status = BtStatusUnavailable;
+        } else {
+            /* Honour the saved Bluetooth setting from the start, so a device
+             * booted with Bluetooth off does not advertise (TASK-702). */
+            nimble_glue_set_advertising_enabled(bt->bt_settings.enabled);
         }
     }
 

@@ -82,6 +82,10 @@ static struct {
     volatile bool gatt_rebuilding;
     volatile bool gatt_rebuild_queued;
     volatile bool central_probe; /* Milestone 2 gate: scanning as central after suspend */
+    /* The user's Bluetooth setting (TASK-702). While set, the host does not
+     * advertise at all, which is what turning Bluetooth off has to mean. */
+    volatile bool adv_disabled;
+    volatile bool adv_setting_queued;
     /* Raw advertising override (TASK-646): when set, start_advertise installs this
      * payload instead of the companion fields, e.g. the DCT FC73 session adv. */
     bool has_custom_adv;
@@ -137,6 +141,8 @@ static void central_finish(void);
 static void gatt_rebuild_post(void);
 static void gatt_rebuild_event_fn(struct ble_npl_event* ev);
 static struct ble_npl_event gatt_rebuild_event;
+static void adv_setting_event_fn(struct ble_npl_event* ev);
+static struct ble_npl_event adv_setting_event;
 
 static void conn_handle_track(uint16_t handle, bool up) {
     for(size_t i = 0; i < COUNT_OF(glue.conn_handles); i++) {
@@ -152,6 +158,7 @@ static void conn_handle_track(uint16_t handle, bool up) {
 }
 
 static void maybe_advertise(void) {
+    if(glue.adv_disabled) return; /* Bluetooth is off in settings */
     if(glue.central_probe) return; /* companion is suspended for a central scan */
     if(glue.gatt_rebuilding) return; /* table rebuild needs no GAP procedure */
     if(glue.advertising) return;
@@ -581,6 +588,7 @@ bool nimble_glue_start(NimbleMode mode) {
 
     nimble_port_init();
     ble_npl_event_init(&gatt_rebuild_event, gatt_rebuild_event_fn, NULL);
+    ble_npl_event_init(&adv_setting_event, adv_setting_event_fn, NULL);
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
 
@@ -942,6 +950,13 @@ bool nimble_glue_central_start(const char* name, NimbleCentralCb cb, void* ctx) 
 
 void nimble_glue_central_stop(void) {
     if(!central.active) return;
+    /* Drop the consumer before anything asynchronous (TASK-701). Terminating a
+     * live link only asks the controller to do it; the DISCONNECT lands later
+     * on the host thread, by which time the caller has usually freed the
+     * context this callback would be handed. It is tearing the session down
+     * anyway, so it does not need the event. */
+    central.cb = NULL;
+    central.ctx = NULL;
     if(central.state == CENTRAL_RUNNING && central.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         /* Drop the central link; central_gap_event's DISCONNECT runs central_finish. */
         ble_gap_terminate(central.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
@@ -1017,6 +1032,44 @@ void nimble_glue_disconnect(void) {
     if(glue.connected && glue.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         ble_gap_terminate(glue.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
     }
+}
+
+/* Applies the Bluetooth setting. Runs on the NimBLE host thread, because every
+ * call below takes the ble_hs lock and the callers are the bt service, the GUI
+ * and app threads (TASK-702). */
+static void adv_setting_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    glue.adv_setting_queued = false;
+
+    if(glue.adv_disabled) {
+        /* Turning Bluetooth off means off: stop advertising and drop every
+         * peripheral link, the way the stock stack behaved. */
+        if(glue.advertising) {
+            ble_gap_adv_stop();
+            glue.advertising = false;
+        }
+        for(size_t i = 0; i < COUNT_OF(glue.conn_handles); i++) {
+            if(glue.conn_handles[i] != BLE_HS_CONN_HANDLE_NONE) {
+                ble_gap_terminate(glue.conn_handles[i], BLE_ERR_REM_USER_CONN_TERM);
+            }
+        }
+        FURI_LOG_I(TAG, "Advertising disabled by settings");
+    } else {
+        FURI_LOG_I(TAG, "Advertising enabled by settings");
+        maybe_advertise();
+    }
+}
+
+void nimble_glue_set_advertising_enabled(bool enabled) {
+    if(!glue.started) return;
+    if(glue.adv_disabled == !enabled) return;
+    glue.adv_disabled = !enabled;
+
+    /* Never touch NimBLE from the caller's thread: hand the work to the host
+     * thread the way the GATT rebuild does. */
+    if(glue.adv_setting_queued) return;
+    glue.adv_setting_queued = true;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &adv_setting_event);
 }
 
 int nimble_glue_link_terminate(uint16_t conn_handle, uint8_t reason) {

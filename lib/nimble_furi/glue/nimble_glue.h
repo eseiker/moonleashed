@@ -134,6 +134,11 @@ uint32_t nimble_glue_passkey(void);
 /* Bytes the connected central has written to the RX characteristic. */
 uint32_t nimble_glue_rx_bytes(void);
 
+/* The user's Bluetooth setting (TASK-702). Disabling stops advertising and
+ * drops every peripheral link, and the host stays quiet until it is enabled
+ * again. Safe from any thread. */
+void nimble_glue_set_advertising_enabled(bool enabled);
+
 /* Terminate the active connection, if any. */
 void nimble_glue_disconnect(void);
 

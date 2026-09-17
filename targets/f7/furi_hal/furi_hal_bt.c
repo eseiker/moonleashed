@@ -338,21 +338,41 @@ FuriHalBleProfileBase* furi_hal_bt_change_app(
     return furi_hal_bt_start_app(profile_template, profile_params, root_keys, event_cb, context);
 }
 
+/* These four answer for whichever host owns the radio (TASK-702). Under the
+ * resident NimBLE host the stock GAP never initializes, so gap_get_state stays
+ * GapStateUninitialized and every caller was told Bluetooth was off. */
+
 bool furi_hal_bt_is_active(void) {
+    if(nimble_glue_is_synced()) {
+        return nimble_glue_is_advertising() || nimble_glue_is_connected();
+    }
     return gap_get_state() > GapStateIdle;
 }
 
 bool furi_hal_bt_is_connected(void) {
+    if(nimble_glue_is_synced()) {
+        return nimble_glue_is_connected();
+    }
     return gap_get_state() == GapStateConnected;
 }
 
 void furi_hal_bt_start_advertising(void) {
+    if(nimble_glue_is_synced()) {
+        nimble_glue_set_advertising_enabled(true);
+        return;
+    }
     if(gap_get_state() == GapStateIdle) {
         gap_start_advertising();
     }
 }
 
 void furi_hal_bt_stop_advertising(void) {
+    if(nimble_glue_is_synced()) {
+        /* Must act on NimBLE: the wait below spins forever otherwise, now that
+         * furi_hal_bt_is_active reports the NimBLE host's state. */
+        nimble_glue_set_advertising_enabled(false);
+        return;
+    }
     if(furi_hal_bt_is_active()) {
         gap_stop_advertising();
         while(furi_hal_bt_is_active()) {
