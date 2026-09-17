@@ -46,7 +46,15 @@ static struct {
     uint16_t mtu;
     bool used;
 } s_reg[FIXEDCID_MAX];
-static uint8_t s_rxbuf[FIXEDCID_RXBUF];
+/* Allocated the first time a PDU arrives on a relayed CID, so a device with no
+ * fixed-CID consumer keeps the 2 KB (TASK-707). Never freed: it is read on the
+ * NimBLE host thread (KNOW-703). */
+static uint8_t* s_rxbuf;
+
+static uint8_t* fixedcid_rxbuf_get(void) {
+    if(!s_rxbuf) s_rxbuf = malloc(FIXEDCID_RXBUF);
+    return s_rxbuf;
+}
 
 /* Caller holds ble_hs lock. */
 static bool fixedcid_is_registered(uint16_t cid) {
@@ -63,14 +71,15 @@ static bool fixedcid_is_registered(uint16_t cid) {
  * link drops, so check the table before delivering. */
 static int fixedcid_rx(struct ble_l2cap_chan* chan, struct os_mbuf** om) {
     uint16_t len = OS_MBUF_PKTLEN(*om);
-    if(len > sizeof(s_rxbuf)) return 0;
+    if(len > FIXEDCID_RXBUF) return 0;
     ble_hs_lock();
     bool deliver = fixedcid_is_registered(chan->scid);
     FixedCidRxCb cb = s_cb;
     void* ctx = s_ctx;
     ble_hs_unlock();
-    if(deliver && cb && os_mbuf_copydata(*om, 0, len, s_rxbuf) == 0) {
-        cb(chan->conn_handle, chan->scid, s_rxbuf, len, ctx);
+    uint8_t* rxbuf = deliver && cb ? fixedcid_rxbuf_get() : NULL;
+    if(rxbuf && os_mbuf_copydata(*om, 0, len, rxbuf) == 0) {
+        cb(chan->conn_handle, chan->scid, rxbuf, len, ctx);
     }
     return 0;
 }

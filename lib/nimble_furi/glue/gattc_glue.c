@@ -23,11 +23,29 @@
 static GattcApiCallback gattc_cb;
 static void* gattc_ctx;
 
-static GattcApiService gattc_svcs[GATTC_MAX_SERVICES];
+/* Discovery accumulators, allocated together on first use so a device with no
+ * GATT client consumer keeps the 2 KB (TASK-707). Never freed: the NimBLE host
+ * thread fills them (KNOW-703). */
+static GattcApiService* gattc_svcs;
 static uint8_t gattc_svc_count;
-static GattcApiChar gattc_chrs[GATTC_MAX_CHARS];
+static GattcApiChar* gattc_chrs;
 static uint8_t gattc_chr_count;
-static uint8_t gattc_buf[512];
+
+static bool gattc_tables_get(void) {
+    if(!gattc_svcs) gattc_svcs = malloc(sizeof(GattcApiService) * GATTC_MAX_SERVICES);
+    if(!gattc_chrs) gattc_chrs = malloc(sizeof(GattcApiChar) * GATTC_MAX_CHARS);
+    return gattc_svcs && gattc_chrs;
+}
+/* Read/notify staging buffer, allocated on first use so a device with no GATT
+ * client consumer keeps it (TASK-707). Never freed: the NimBLE host thread
+ * reads it (KNOW-703). */
+#define GATTC_BUF_SIZE 512
+static uint8_t* gattc_buf;
+
+static uint8_t* gattc_buf_get(void) {
+    if(!gattc_buf) gattc_buf = malloc(GATTC_BUF_SIZE);
+    return gattc_buf;
+}
 
 static void gattc_emit(const GattcApiEvent* ev) {
     if(gattc_cb) gattc_cb(ev, gattc_ctx);
@@ -62,7 +80,7 @@ static int gattc_on_svc(
     void* arg) {
     UNUSED(arg);
     if(error->status == 0 && service) {
-        if(gattc_svc_count < GATTC_MAX_SERVICES) {
+        if(gattc_tables_get() && gattc_svc_count < GATTC_MAX_SERVICES) {
             GattcApiService* s = &gattc_svcs[gattc_svc_count++];
             memset(s, 0, sizeof(*s));
             s->start_handle = service->start_handle;
@@ -93,7 +111,7 @@ static int gattc_on_chr(
     void* arg) {
     UNUSED(arg);
     if(error->status == 0 && chr) {
-        if(gattc_chr_count < GATTC_MAX_CHARS) {
+        if(gattc_tables_get() && gattc_chr_count < GATTC_MAX_CHARS) {
             GattcApiChar* c = &gattc_chrs[gattc_chr_count++];
             memset(c, 0, sizeof(*c));
             c->decl_handle = chr->def_handle;
@@ -129,12 +147,14 @@ static int gattc_on_read(
         return 0;
     }
     uint16_t len = OS_MBUF_PKTLEN(attr->om);
-    if(len > sizeof(gattc_buf)) len = sizeof(gattc_buf);
-    if(len) os_mbuf_copydata(attr->om, 0, len, gattc_buf);
+    uint8_t* buf = gattc_buf_get();
+    if(!buf) return 0;
+    if(len > GATTC_BUF_SIZE) len = GATTC_BUF_SIZE;
+    if(len) os_mbuf_copydata(attr->om, 0, len, buf);
     GattcApiEvent ev = {
         .type = GattcApiReadComplete,
         .conn_handle = conn_handle,
-        .data = gattc_buf,
+        .data = buf,
         .data_len = len,
         .value_handle = attr->handle};
     gattc_emit(&ev);

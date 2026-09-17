@@ -211,7 +211,18 @@ static struct {
 
 static CocApiCallback coc_api_cb;
 static void* coc_api_ctx;
-static uint8_t coc_api_rxbuf[2048]; /* holds a full DCT SDU (MTU 1550) */
+/* Receive buffer for a full SDU (the DCT MTU is 1550). Allocated the first
+ * time a CoC is actually used, so a device with no CoC consumer keeps the 2 KB
+ * (TASK-707). It is never freed: it is read on the NimBLE host thread, and
+ * releasing it from an API caller's thread is the use-after-free shape that
+ * already bit the session teardown (KNOW-703). */
+#define COC_API_RXBUF_SIZE 2048
+static uint8_t* coc_api_rxbuf;
+
+static uint8_t* coc_api_rxbuf_get(void) {
+    if(!coc_api_rxbuf) coc_api_rxbuf = malloc(COC_API_RXBUF_SIZE);
+    return coc_api_rxbuf;
+}
 
 static int coc_api_alloc_index(struct ble_l2cap_chan* chan, uint16_t conn_handle) {
     for(int i = 0; i < COC_API_MAX_CHAN; i++) {
@@ -245,7 +256,7 @@ static void coc_api_emit(const CocApiEvent* ev) {
 }
 
 static struct os_mbuf* coc_api_sdu(void) {
-    return os_msys_get_pkthdr(sizeof(coc_api_rxbuf), 0);
+    return os_msys_get_pkthdr(COC_API_RXBUF_SIZE, 0);
 }
 
 static int coc_api_l2cap_event(struct ble_l2cap_event* event, void* arg) {
@@ -304,13 +315,14 @@ static int coc_api_l2cap_event(struct ble_l2cap_event* event, void* arg) {
         struct os_mbuf* sdu_rx = event->receive.sdu_rx;
         int idx = coc_api_index_of(event->receive.chan);
         uint16_t len = OS_MBUF_PKTLEN(sdu_rx);
-        if(len > sizeof(coc_api_rxbuf)) len = sizeof(coc_api_rxbuf);
-        if(len && os_mbuf_copydata(sdu_rx, 0, len, coc_api_rxbuf) == 0 && idx >= 0) {
+        uint8_t* rxbuf = coc_api_rxbuf_get();
+        if(len > COC_API_RXBUF_SIZE) len = COC_API_RXBUF_SIZE;
+        if(rxbuf && len && os_mbuf_copydata(sdu_rx, 0, len, rxbuf) == 0 && idx >= 0) {
             CocApiEvent ev = {
                 .type = CocApiData,
                 .channel_index = (uint8_t)idx,
                 .conn_handle = coc_api_chans[idx].conn_handle,
-                .data = coc_api_rxbuf,
+                .data = rxbuf,
                 .data_len = len};
             coc_api_emit(&ev);
         }
