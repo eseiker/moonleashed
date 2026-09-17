@@ -1,5 +1,5 @@
 entry,status,name,type,params
-Version,+,88.20,,
+Version,+,88.21,,
 Header,+,applications/drivers/subghz/cc1101_ext/cc1101_ext_interconnect.h,,
 Header,+,applications/services/applications.h,,
 Header,+,applications/services/bt/bt_service/bt.h,,
@@ -872,6 +872,7 @@ Function,+,ble_l2cap_fixed_register,_Bool,"uint16_t, uint16_t"
 Function,+,ble_l2cap_fixed_send,_Bool,"uint16_t, uint16_t, const uint8_t*, uint16_t"
 Function,+,ble_l2cap_fixed_set_callback,void,"BleL2capFixedCallback, void*"
 Function,+,ble_l2cap_fixed_set_link_callback,void,"BleL2capFixedLinkCallback, void*"
+Function,+,ble_l2cap_fixed_set_link_info_callback,void,"BleL2capFixedLinkInfoCallback, void*"
 Function,+,ble_l2cap_fixed_unregister,_Bool,uint16_t
 Function,+,ble_link_disconnect,BleLinkDisconnectStatus,"uint16_t, uint8_t"
 Function,-,ble_profile_hid_consumer_key_press,_Bool,"FuriHalBleProfileBase*, uint16_t"

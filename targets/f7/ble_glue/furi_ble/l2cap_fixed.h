@@ -32,6 +32,33 @@ typedef void (*BleL2capFixedCallback)(
 typedef void (
     *BleL2capFixedLinkCallback)(uint16_t connection_handle, bool connected, void* context);
 
+/** One BLE address: type is 0 public, 1 random, 2 public identity, 3 random
+ *  identity, and value is little-endian, the order NimBLE and HCI use. */
+typedef struct {
+    uint8_t type;
+    uint8_t value[6];
+} BleL2capFixedAddr;
+
+/** What the link-info callback reports. The over-the-air addresses are the
+ *  link-layer ones, which is how each end identifies the link; the identity
+ *  addresses are the resolved ones, and match the over-the-air pair when no
+ *  resolvable private address is in use. disconnect_reason is the HCI reason on
+ *  a down report, for example 19 for remote user terminated, and 0 on an up
+ *  report. */
+typedef struct {
+    uint16_t connection_handle;
+    bool connected;
+    uint8_t disconnect_reason;
+    BleL2capFixedAddr peer_ota;
+    BleL2capFixedAddr peer_id;
+    BleL2capFixedAddr our_ota;
+    BleL2capFixedAddr our_id;
+} BleL2capFixedLinkInfo;
+
+/** Link callback carrying addresses and the disconnect reason. info is valid
+ *  only during the call. */
+typedef void (*BleL2capFixedLinkInfoCallback)(const BleL2capFixedLinkInfo* info, void* context);
+
 /** Initialize the fixed-CID relay (idempotent). */
 void ble_l2cap_fixed_init(void);
 
@@ -46,6 +73,13 @@ void ble_l2cap_fixed_set_callback(BleL2capFixedCallback callback, void* context)
  *  reports each link that already exists, so a caller learns the connection
  *  handle to send on before the peer has sent anything. */
 void ble_l2cap_fixed_set_link_callback(BleL2capFixedLinkCallback callback, void* context);
+
+/** Set the single link-info callback (NULL to clear). It reports the same links
+ *  as ble_l2cap_fixed_set_link_callback, on the same thread, and adds the
+ *  addresses and the disconnect reason. Both callbacks can be set at once; this
+ *  one runs first, so a consumer that forwards both sends the detailed report
+ *  before the plain one. */
+void ble_l2cap_fixed_set_link_info_callback(BleL2capFixedLinkInfoCallback callback, void* context);
 
 /** Relay a fixed CID on every connection (current and future). mtu 0, or an mtu
  *  above 2044, uses 2044; NimBLE rejects a PDU above the channel MTU.

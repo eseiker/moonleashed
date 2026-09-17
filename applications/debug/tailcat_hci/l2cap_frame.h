@@ -82,15 +82,25 @@ _Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must
                                 * peer's CoC SDU MTU; cap SENDs at min(peer_mtu,
                                 * L2F_COC_MTU). Appended field: readers of the old
                                 * 3-byte payload keep working. */
-#define L2F_DATA             0x82 /* [channel:1][data...] */
-#define L2F_DISCONNECTED     0x83 /* [channel:1]          */
-#define L2F_ERROR            0x84 /* [code:2]             */
-#define L2F_FIXED_DATA       0x90 /* [conn:2][cid:2][pdu...] inbound fixed-CID PDU */
+#define L2F_DATA         0x82 /* [channel:1][data...] */
+#define L2F_DISCONNECTED 0x83 /* [channel:1]          */
+#define L2F_ERROR        0x84 /* [code:2]             */
+#define L2F_FIXED_DATA   0x90 /* [conn:2][cid:2][pdu...] inbound fixed-CID PDU */
 /* FIXED_LINK: a BLE link came up (up=1) or went down (up=0). Sent for every
  * link while the bridge runs, and again for each existing link after a
  * FIXED_REGISTER, so the host learns the conn to FIXED_SEND on before the peer
  * speaks (Magnet's VersionInfo goes first). An up report can repeat. */
-#define L2F_FIXED_LINK       0x91 /* [conn:2][up:1] */
+#define L2F_FIXED_LINK   0x91 /* [conn:2][up:1] */
+/* FIXED_LINK_INFO: the same report as FIXED_LINK with what a multi-connection
+ * protocol needs (TASK-713, KNOW-711). It is sent immediately before each
+ * FIXED_LINK, so a host that only reads FIXED_LINK is unaffected. An address is
+ * [type:1][addr:6], little-endian, with type 0 public, 1 random, 2 public
+ * identity, 3 random identity. The over-the-air pair is the link-layer
+ * addresses; the identity pair is the resolved one. reason is the HCI
+ * disconnect reason on a down report, 19 for remote user terminated, and 0 on
+ * an up report. */
+#define L2F_FIXED_LINK_INFO \
+    0x92 /* [conn:2][up:1][reason:1][peer_ota:7][peer_id:7][our_ota:7][our_id:7] */
 /* SEC_EVENT payload: [kind:1][conn:2][status:2][passkey:4][flags:1][key_size:1].
  * kind is 0 passkey display, 1 passkey request, 2 numeric comparison,
  * 3 OOB request, 4 encryption changed, 5 repeat pairing.

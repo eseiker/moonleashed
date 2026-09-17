@@ -133,6 +133,30 @@ static void
     l2_emit(app, L2F_FIXED_DATA, buf, len + 4);
 }
 
+/* A link came up or went down (dispatch thread), with the addresses and the
+ * disconnect reason the enrollment stage machine needs (TASK-713). Sent before
+ * the plain FIXED_LINK below, which a host may be the only one reading. */
+static uint8_t* fixed_put_addr(uint8_t* p, const BleL2capFixedAddr* addr) {
+    *p++ = addr->type;
+    memcpy(p, addr->value, sizeof(addr->value));
+    return p + sizeof(addr->value);
+}
+
+static void on_fixed_link_info(const BleL2capFixedLinkInfo* info, void* context) {
+    L2App* app = context;
+    uint8_t p[32];
+    p[0] = (uint8_t)info->connection_handle;
+    p[1] = (uint8_t)(info->connection_handle >> 8);
+    p[2] = info->connected ? 1 : 0;
+    p[3] = info->disconnect_reason;
+    uint8_t* w = p + 4;
+    w = fixed_put_addr(w, &info->peer_ota);
+    w = fixed_put_addr(w, &info->peer_id);
+    w = fixed_put_addr(w, &info->our_ota);
+    w = fixed_put_addr(w, &info->our_id);
+    l2_emit(app, L2F_FIXED_LINK_INFO, p, (uint16_t)(w - p));
+}
+
 /* A link came up or went down (dispatch thread). Frame it as [conn:2][up:1]. */
 static void on_fixed_link(uint16_t conn, bool connected, void* context) {
     L2App* app = context;
@@ -763,6 +787,7 @@ int32_t tailcat_l2cap_app(void* context) {
     ble_l2cap_fixed_init();
     ble_l2cap_fixed_set_callback(on_fixed, app);
     ble_l2cap_fixed_set_link_callback(on_fixed_link, app);
+    ble_l2cap_fixed_set_link_info_callback(on_fixed_link_info, app);
     /* GATT fixtures the host defines (TASK-666). Registering the consumer adds
      * no services, so the companion's GATT table is untouched until it does. */
     ble_gatt_server_init();
@@ -825,6 +850,7 @@ int32_t tailcat_l2cap_app(void* context) {
     ble_gatt_client_deinit();
     ble_gatt_server_set_callback(NULL, NULL);
     ble_gatt_server_deinit(); /* removes our services and rebuilds the table */
+    ble_l2cap_fixed_set_link_info_callback(NULL, NULL);
     ble_l2cap_fixed_set_link_callback(NULL, NULL);
     ble_l2cap_fixed_set_callback(NULL, NULL);
     ble_l2cap_fixed_deinit();

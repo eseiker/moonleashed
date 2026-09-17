@@ -34,10 +34,33 @@ typedef void (*FixedCidRxCb)(
     uint16_t len,
     void* ctx);
 
-/* Runs on the NimBLE host thread, without the ble_hs lock. up is true when a
- * link on which the registered CIDs are available came up, false when it went
- * down. The same link can be reported up more than once. */
-typedef void (*FixedCidLinkCb)(uint16_t conn_handle, bool up, void* ctx);
+/* One BLE address, laid out like NimBLE's ble_addr_t: type is 0 public,
+ * 1 random, 2 public identity, 3 random identity, and val is little-endian. */
+typedef struct {
+    uint8_t type;
+    uint8_t val[6];
+} FixedCidAddr;
+
+/* What a link report carries. The over-the-air addresses are the link-layer
+ * ones, which is what a peer identifies the link by; the identity addresses are
+ * the resolved ones, and match the over-the-air pair when no resolvable private
+ * address is in use. reason is the HCI disconnect reason on a down report, for
+ * example 19 for remote user terminated, and 0 on an up report (TASK-713). */
+typedef struct {
+    uint16_t conn_handle;
+    bool up;
+    uint8_t reason;
+    FixedCidAddr peer_ota;
+    FixedCidAddr peer_id;
+    FixedCidAddr our_ota;
+    FixedCidAddr our_id;
+} FixedCidLinkInfo;
+
+/* Runs on the NimBLE host thread, without the ble_hs lock. info->up is true
+ * when a link on which the registered CIDs are available came up, false when it
+ * went down. The same link can be reported up more than once. info is valid
+ * only during the call. */
+typedef void (*FixedCidLinkCb)(const FixedCidLinkInfo* info, void* ctx);
 
 /* Set the single receive dispatcher. */
 void fixedcid_init(FixedCidRxCb dispatch, void* ctx);

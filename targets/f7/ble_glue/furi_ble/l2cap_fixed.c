@@ -19,6 +19,8 @@ static BleL2capFixedCallback s_callback;
 static void* s_context;
 static BleL2capFixedLinkCallback s_link_callback;
 static void* s_link_context;
+static BleL2capFixedLinkInfoCallback s_link_info_callback;
+static void* s_link_info_context;
 static bool s_started;
 
 typedef struct {
@@ -52,25 +54,31 @@ static void fixed_dispatch(
     ble_dispatch_post(fixed_deliver, b);
 }
 
-typedef struct {
-    uint16_t conn_handle;
-    bool connected;
-} FixedLinkBlob;
-
 /* Dispatch thread. */
 static void fixed_link_deliver(void* blob) {
-    FixedLinkBlob* b = blob;
+    BleL2capFixedLinkInfo* b = blob;
     ble_dispatch_lock();
-    if(s_link_callback) s_link_callback(b->conn_handle, b->connected, s_link_context);
+    if(s_link_info_callback) s_link_info_callback(b, s_link_info_context);
+    if(s_link_callback) s_link_callback(b->connection_handle, b->connected, s_link_context);
     ble_dispatch_unlock();
 }
 
+static void fixed_copy_addr(BleL2capFixedAddr* out, const FixedCidAddr* in) {
+    out->type = in->type;
+    memcpy(out->value, in->val, sizeof(out->value));
+}
+
 /* NimBLE host thread (GAP listener, or the caller of register). */
-static void fixed_link_dispatch(uint16_t conn_handle, bool up, void* ctx) {
+static void fixed_link_dispatch(const FixedCidLinkInfo* info, void* ctx) {
     UNUSED(ctx);
-    FixedLinkBlob* b = malloc(sizeof(FixedLinkBlob));
-    b->conn_handle = conn_handle;
-    b->connected = up;
+    BleL2capFixedLinkInfo* b = malloc(sizeof(BleL2capFixedLinkInfo));
+    b->connection_handle = info->conn_handle;
+    b->connected = info->up;
+    b->disconnect_reason = info->reason;
+    fixed_copy_addr(&b->peer_ota, &info->peer_ota);
+    fixed_copy_addr(&b->peer_id, &info->peer_id);
+    fixed_copy_addr(&b->our_ota, &info->our_ota);
+    fixed_copy_addr(&b->our_id, &info->our_id);
     ble_dispatch_post(fixed_link_deliver, b);
 }
 
@@ -90,6 +98,8 @@ void ble_l2cap_fixed_deinit(void) {
     s_context = NULL;
     s_link_callback = NULL;
     s_link_context = NULL;
+    s_link_info_callback = NULL;
+    s_link_info_context = NULL;
     ble_dispatch_unlock();
     s_started = false;
 }
@@ -105,6 +115,13 @@ void ble_l2cap_fixed_set_link_callback(BleL2capFixedLinkCallback callback, void*
     ble_dispatch_lock();
     s_link_callback = callback;
     s_link_context = context;
+    ble_dispatch_unlock();
+}
+
+void ble_l2cap_fixed_set_link_info_callback(BleL2capFixedLinkInfoCallback callback, void* context) {
+    ble_dispatch_lock();
+    s_link_info_callback = callback;
+    s_link_info_context = context;
     ble_dispatch_unlock();
 }
 

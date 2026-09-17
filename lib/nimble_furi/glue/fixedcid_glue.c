@@ -85,12 +85,35 @@ static int fixedcid_rx(struct ble_l2cap_chan* chan, struct os_mbuf** om) {
     return 0;
 }
 
-static void fixedcid_report_link(uint16_t conn_handle, bool up) {
+static void fixedcid_copy_addr(FixedCidAddr* out, const ble_addr_t* in) {
+    out->type = in->type;
+    memcpy(out->val, in->val, sizeof(out->val));
+}
+
+static void fixedcid_fill(FixedCidLinkInfo* info, const struct ble_gap_conn_desc* desc) {
+    fixedcid_copy_addr(&info->peer_ota, &desc->peer_ota_addr);
+    fixedcid_copy_addr(&info->peer_id, &desc->peer_id_addr);
+    fixedcid_copy_addr(&info->our_ota, &desc->our_ota_addr);
+    fixedcid_copy_addr(&info->our_id, &desc->our_id_addr);
+}
+
+/* Host thread. Deliver a report whose addresses the caller already filled. */
+static void fixedcid_report_link_info(const FixedCidLinkInfo* info) {
     ble_hs_lock();
     FixedCidLinkCb cb = s_link_cb;
     void* ctx = s_link_ctx;
     ble_hs_unlock();
-    if(cb) cb(conn_handle, up, ctx);
+    if(cb) cb(info, ctx);
+}
+
+/* Host thread, ble_hs lock not held: ble_gap_conn_find takes it itself. The
+ * addresses stay zero when the link is already gone, which happens on a
+ * disconnect; that path fills them from the event's own descriptor instead. */
+static void fixedcid_report_link(uint16_t conn_handle, bool up, uint8_t reason) {
+    FixedCidLinkInfo info = {.conn_handle = conn_handle, .up = up, .reason = reason};
+    struct ble_gap_conn_desc desc;
+    if(ble_gap_conn_find(conn_handle, &desc) == 0) fixedcid_fill(&info, &desc);
+    fixedcid_report_link_info(&info);
 }
 
 /* Host thread, ble_hs lock not held. NimBLE calls listeners for every link,
@@ -101,12 +124,28 @@ static int fixedcid_gap_listener(struct ble_gap_event* event, void* arg) {
     case BLE_GAP_EVENT_CONNECT:
         if(event->connect.status == 0) {
             fixedcid_on_connect(event->connect.conn_handle);
-            fixedcid_report_link(event->connect.conn_handle, true);
+            fixedcid_report_link(event->connect.conn_handle, true, 0);
         }
         break;
-    case BLE_GAP_EVENT_DISCONNECT:
-        fixedcid_report_link(event->disconnect.conn.conn_handle, false);
-        break;
+    case BLE_GAP_EVENT_DISCONNECT: {
+        /* The connection is already gone, so take the addresses from the
+         * event's own descriptor. NimBLE reports the HCI reason offset by
+         * BLE_HS_ERR_HCI_BASE; the host wants the raw HCI code, where 19 is
+         * remote user terminated (TASK-713). */
+        int reason = event->disconnect.reason;
+        if(reason >= BLE_HS_ERR_HCI_BASE && reason < BLE_HS_ERR_HCI_BASE + 0x100) {
+            reason -= BLE_HS_ERR_HCI_BASE;
+        } else {
+            reason = 0;
+        }
+        FixedCidLinkInfo info = {
+            .conn_handle = event->disconnect.conn.conn_handle,
+            .up = false,
+            .reason = (uint8_t)reason,
+        };
+        fixedcid_fill(&info, &event->disconnect.conn);
+        fixedcid_report_link_info(&info);
+    } break;
     default:
         break;
     }
@@ -220,7 +259,7 @@ bool fixedcid_register(uint16_t cid, uint16_t mtu) {
     ble_hs_unlock();
     FURI_LOG_I(TAG, "registered fixed CID 0x%04X mtu=%u", cid, mtu);
     for(size_t i = 0; i < link_count; i++)
-        fixedcid_report_link(links[i], true);
+        fixedcid_report_link(links[i], true, 0);
     return true;
 }
 
