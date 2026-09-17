@@ -15,6 +15,7 @@
 #include "host/ble_hs.h"
 #include "host/ble_l2cap.h"
 
+#include "nimble/nimble_port.h"
 #include "coc_glue.h"
 
 #define TAG "Coc"
@@ -357,10 +358,30 @@ void coc_api_init(CocApiCallback dispatch, void* context) {
     FURI_LOG_I(TAG, "coc_api initialized");
 }
 
+/* Frees the receive buffer on the NimBLE host thread (TASK-708). The host task
+ * is single threaded, so this handler cannot overlap the L2CAP receive callback
+ * that reads the buffer; releasing it from the API caller's thread could
+ * (KNOW-703). If an SDU arrives later, the receive path allocates again. */
+static struct ble_npl_event coc_api_release_event;
+static bool coc_api_release_queued;
+
+static void coc_api_release_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    coc_api_release_queued = false;
+    free(coc_api_rxbuf);
+    coc_api_rxbuf = NULL;
+}
+
 void coc_api_deinit(void) {
     coc_api_cb = NULL;
     coc_api_ctx = NULL;
     memset(coc_api_chans, 0, sizeof(coc_api_chans));
+
+    if(coc_api_rxbuf && !coc_api_release_queued) {
+        coc_api_release_queued = true;
+        ble_npl_event_init(&coc_api_release_event, coc_api_release_fn, NULL);
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &coc_api_release_event);
+    }
 }
 
 bool coc_api_listen(uint16_t psm, uint16_t mtu) {

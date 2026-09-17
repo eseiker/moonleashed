@@ -88,6 +88,7 @@ static struct {
     volatile bool adv_disabled;
     volatile bool adv_setting_queued;
     volatile bool disconnect_queued;
+    volatile bool central_stop_queued;
     /* Raw advertising override (TASK-646): when set, start_advertise installs this
      * payload instead of the companion fields, e.g. the DCT FC73 session adv. */
     bool has_custom_adv;
@@ -147,6 +148,8 @@ static void adv_setting_event_fn(struct ble_npl_event* ev);
 static struct ble_npl_event adv_setting_event;
 static void disconnect_event_fn(struct ble_npl_event* ev);
 static struct ble_npl_event disconnect_event;
+static void central_stop_event_fn(struct ble_npl_event* ev);
+static struct ble_npl_event central_stop_event;
 
 static void conn_handle_track(uint16_t handle, bool up) {
     for(size_t i = 0; i < COUNT_OF(glue.conn_handles); i++) {
@@ -594,6 +597,7 @@ bool nimble_glue_start(NimbleMode mode) {
     ble_npl_event_init(&gatt_rebuild_event, gatt_rebuild_event_fn, NULL);
     ble_npl_event_init(&adv_setting_event, adv_setting_event_fn, NULL);
     ble_npl_event_init(&disconnect_event, disconnect_event_fn, NULL);
+    ble_npl_event_init(&central_stop_event, central_stop_event_fn, NULL);
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
 
@@ -962,6 +966,21 @@ void nimble_glue_central_stop(void) {
      * anyway, so it does not need the event. */
     central.cb = NULL;
     central.ctx = NULL;
+
+    /* The GAP work runs on the NimBLE host thread (TASK-708). The caller is an
+     * app thread tearing its session down, and calling ble_gap_terminate or
+     * ble_gap_disc_cancel from there is the cross-thread shape that crashed the
+     * device when the Tailcat bridge exited with a live central link
+     * (KNOW-703). */
+    if(glue.central_stop_queued) return;
+    glue.central_stop_queued = true;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &central_stop_event);
+}
+
+static void central_stop_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    glue.central_stop_queued = false;
+    if(!central.active) return;
     if(central.state == CENTRAL_RUNNING && central.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         /* Drop the central link; central_gap_event's DISCONNECT runs central_finish. */
         ble_gap_terminate(central.conn_handle, BLE_ERR_REM_USER_CONN_TERM);

@@ -25,6 +25,7 @@
 #include "ble_hs_conn_priv.h"
 #include "ble_l2cap_priv.h"
 
+#include "nimble/nimble_port.h"
 #include "fixedcid_glue.h"
 
 #define TAG "FixedCid"
@@ -152,6 +153,18 @@ void fixedcid_set_link_cb(FixedCidLinkCb dispatch, void* ctx) {
     ble_hs_unlock();
 }
 
+/* See coc_api_deinit: the buffer is freed on the NimBLE host thread so it
+ * cannot race the receive callback (TASK-708). */
+static struct ble_npl_event fixedcid_release_event;
+static bool fixedcid_release_queued;
+
+static void fixedcid_release_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    fixedcid_release_queued = false;
+    free(s_rxbuf);
+    s_rxbuf = NULL;
+}
+
 void fixedcid_deinit(void) {
     ble_hs_lock();
     s_cb = NULL;
@@ -160,6 +173,12 @@ void fixedcid_deinit(void) {
     s_link_ctx = NULL;
     memset(s_reg, 0, sizeof(s_reg));
     ble_hs_unlock();
+
+    if(s_rxbuf && !fixedcid_release_queued) {
+        fixedcid_release_queued = true;
+        ble_npl_event_init(&fixedcid_release_event, fixedcid_release_fn, NULL);
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &fixedcid_release_event);
+    }
 }
 
 bool fixedcid_register(uint16_t cid, uint16_t mtu) {

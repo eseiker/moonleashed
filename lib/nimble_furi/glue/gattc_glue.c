@@ -16,6 +16,7 @@
 #include "host/ble_gatt.h"
 #include "host/ble_uuid.h"
 
+#include "nimble/nimble_port.h"
 #include "gattc_glue.h"
 
 #define TAG "GattcGlue"
@@ -199,9 +200,33 @@ void gattc_api_init(GattcApiCallback dispatch, void* context) {
     FURI_LOG_I(TAG, "gattc_api initialized");
 }
 
+/* See coc_api_deinit: freed on the NimBLE host thread, which fills these during
+ * discovery, so the release cannot race it (TASK-708). */
+static struct ble_npl_event gattc_release_event;
+static bool gattc_release_queued;
+
+static void gattc_release_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    gattc_release_queued = false;
+    free(gattc_svcs);
+    gattc_svcs = NULL;
+    free(gattc_chrs);
+    gattc_chrs = NULL;
+    free(gattc_buf);
+    gattc_buf = NULL;
+    gattc_svc_count = 0;
+    gattc_chr_count = 0;
+}
+
 void gattc_api_deinit(void) {
     gattc_cb = NULL;
     gattc_ctx = NULL;
+
+    if((gattc_svcs || gattc_chrs || gattc_buf) && !gattc_release_queued) {
+        gattc_release_queued = true;
+        ble_npl_event_init(&gattc_release_event, gattc_release_fn, NULL);
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &gattc_release_event);
+    }
 }
 
 bool gattc_api_discover_services(uint16_t conn_handle) {
