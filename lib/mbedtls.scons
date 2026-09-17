@@ -41,11 +41,13 @@ sources = [
     File("mbedtls/library/aes.c"),
     File("mbedtls/library/bignum.c"),
     File("mbedtls/library/bignum_core.c"),
-    # cipher + cmac + ecdh back NimBLE's BLE Secure Connections algorithms:
-    # ble_sm_alg.c calls mbedtls_cipher_cmac and mbedtls_ecdh_compute_shared.
-    File("mbedtls/library/cipher.c"),
-    File("mbedtls/library/cipher_wrap.c"),
-    File("mbedtls/library/cmac.c"),
+    # cipher.c, cipher_wrap.c and cmac.c are deliberately absent (TASK-705).
+    # Only NimBLE's Security Manager used them, through mbedtls_cipher_cmac, and
+    # a generic algorithm dispatch for one fixed algorithm cost about 2 KB.
+    # lib/nimble_furi/glue/sm_cmac.c provides mbedtls_cipher_cmac directly over
+    # AES-ECB instead. NFC calls mbedtls_aes_* and mbedtls_des_* directly, so
+    # nothing else is affected.
+    # ecdh.c stays for now; ble_sm_alg's ECC went to the PKA (TASK-698).
     File("mbedtls/library/constant_time.c"),
     File("mbedtls/library/ecdh.c"),
     File("mbedtls/library/ecdsa.c"),

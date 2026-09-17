@@ -178,6 +178,10 @@ bool nimble_glue_faulted(void);
  * false when Secure Connections is not built. */
 bool sm_alg_pka_selftest(void);
 
+/* Check the AES-CMAC that replaced mbedtls' cipher layer against the RFC 4493
+ * vectors (TASK-705). The Security Manager's f4, f5, f6 and g2 all use it. */
+bool sm_cmac_selftest(void);
+
 /* Gracefully stops the host (ble_hs_stop), exits the host thread, stops the HCI
  * reader, and frees every NPL FURI object. After this the FAP can unload
  * without a reboot; the caller still releases the controller afterwards. */

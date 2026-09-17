@@ -518,12 +518,17 @@ static void bt_change_profile(Bt* bt, BtMessage* message) {
 }
 
 static void bt_close_connection(Bt* bt);
+static void bt_apply_settings(Bt* bt);
 
 static void bt_suspend_profile(Bt* bt, BtMessage* message) {
     bool result = !bt->profile_suspended;
     if(result) {
         bt_close_connection(bt);
         if(bt->nimble_active) {
+            /* Free the radio, not just the link. The XIP flash guard suspends
+             * the profile before erasing flash, and an erase contends with CPU2
+             * while the radio is still advertising (TASK-706). */
+            nimble_glue_set_advertising_enabled(false);
             bt_nimble_stop_profile(bt);
         }
         /* furi_hal_bt_enter_ll_only() owns and frees the HAL profile next. */
@@ -542,7 +547,11 @@ static void bt_resume_default_profile(Bt* bt, BtMessage* message) {
             .result = &result,
         };
         bt_change_profile(bt, &profile_message);
-        if(result) bt->profile_suspended = false;
+        if(result) {
+            bt->profile_suspended = false;
+            /* Advertise again only if the user's setting says so (TASK-706). */
+            if(bt->nimble_active) bt_apply_settings(bt);
+        }
     }
     if(message->result) *message->result = result;
 }

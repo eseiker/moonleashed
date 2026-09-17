@@ -287,6 +287,7 @@ static void bt_cli_command_pka_test(PipeSide* pipe, FuriString* args, void* cont
     UNUSED(args);
     UNUSED(context);
     printf("PKA P-256 self-test: %s\r\n", sm_alg_pka_selftest() ? "PASS" : "FAIL (see the log)");
+    printf("AES-CMAC self-test: %s\r\n", sm_cmac_selftest() ? "PASS" : "FAIL (see the log)");
 }
 
 static void bt_cli_print_usage(void) {
@@ -294,7 +295,7 @@ static void bt_cli_print_usage(void) {
     printf("bt <cmd> <args>\r\n");
     printf("Cmd list:\r\n");
     printf("\thci_info\t - HCI info\r\n");
-    printf("\tpka_test\t - PKA P-256 self-test against a NIST vector\r\n");
+    printf("\tpka_test\t - crypto self-tests: PKA P-256 and AES-CMAC\r\n");
     printf("\tnimble_scan\t - NimBLE central scan probe (suspends companion)\r\n");
     printf("\tnimble_coc <psm>\t - NimBLE modal DCT: connect to 'FlipperDCT' + CoC\r\n");
     if(furi_hal_rtc_is_flag_set(FuriHalRtcFlagDebug) && furi_hal_bt_is_testing_supported()) {

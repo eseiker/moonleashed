@@ -87,6 +87,7 @@ static struct {
      * advertise at all, which is what turning Bluetooth off has to mean. */
     volatile bool adv_disabled;
     volatile bool adv_setting_queued;
+    volatile bool disconnect_queued;
     /* Raw advertising override (TASK-646): when set, start_advertise installs this
      * payload instead of the companion fields, e.g. the DCT FC73 session adv. */
     bool has_custom_adv;
@@ -144,6 +145,8 @@ static void gatt_rebuild_event_fn(struct ble_npl_event* ev);
 static struct ble_npl_event gatt_rebuild_event;
 static void adv_setting_event_fn(struct ble_npl_event* ev);
 static struct ble_npl_event adv_setting_event;
+static void disconnect_event_fn(struct ble_npl_event* ev);
+static struct ble_npl_event disconnect_event;
 
 static void conn_handle_track(uint16_t handle, bool up) {
     for(size_t i = 0; i < COUNT_OF(glue.conn_handles); i++) {
@@ -590,6 +593,7 @@ bool nimble_glue_start(NimbleMode mode) {
     nimble_port_init();
     ble_npl_event_init(&gatt_rebuild_event, gatt_rebuild_event_fn, NULL);
     ble_npl_event_init(&adv_setting_event, adv_setting_event_fn, NULL);
+    ble_npl_event_init(&disconnect_event, disconnect_event_fn, NULL);
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
 
@@ -1029,10 +1033,23 @@ uint32_t nimble_glue_rx_bytes(void) {
     return serial_gatt_rx_bytes();
 }
 
-void nimble_glue_disconnect(void) {
+/* Drops the companion link. Runs on the NimBLE host thread (TASK-706): callers
+ * are the bt service and, through the XIP flash guard, the loader, and taking
+ * the ble_hs lock from those threads is what froze the device before
+ * (KNOW-703). */
+static void disconnect_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    glue.disconnect_queued = false;
     if(glue.connected && glue.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
         ble_gap_terminate(glue.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
     }
+}
+
+void nimble_glue_disconnect(void) {
+    if(!glue.started) return;
+    if(glue.disconnect_queued) return;
+    glue.disconnect_queued = true;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &disconnect_event);
 }
 
 /* Applies the Bluetooth setting. Runs on the NimBLE host thread, because every
