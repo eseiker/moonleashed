@@ -30,6 +30,7 @@
 #include "host/ble_gap.h"
 #include "host/ble_gatt.h"
 #include "host/ble_sm.h"
+#include "host/ble_dtm.h"
 #include "host/ble_store.h"
 #include "host/ble_uuid.h"
 #include "nimble/ble.h"
@@ -1070,6 +1071,45 @@ void nimble_glue_set_advertising_enabled(bool enabled) {
     if(glue.adv_setting_queued) return;
     glue.adv_setting_queued = true;
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &adv_setting_event);
+}
+
+/* --- Direct Test Mode (TASK-704) --------------------------------------------
+ *
+ * The standard HCI LE test commands, which the HCILayer controller implements.
+ * The caller runs these from the CLI thread with advertising stopped and links
+ * dropped, so the host is otherwise idle; they need a synchronous result, which
+ * is why they are not deferred to the host thread like the advertising setting.
+ */
+
+bool nimble_glue_dtm_tx_start(uint8_t channel, uint8_t payload, uint8_t phy) {
+    struct ble_dtm_tx_params p = {
+        .channel = channel,
+        .test_data_len = 37, /* the maximum a test packet carries */
+        .payload = payload,
+        .phy = phy,
+    };
+    int rc = ble_dtm_tx_start(&p);
+    if(rc != 0) FURI_LOG_E(TAG, "DTM TX start rc=%d", rc);
+    return rc == 0;
+}
+
+bool nimble_glue_dtm_rx_start(uint8_t channel, uint8_t phy) {
+    struct ble_dtm_rx_params p = {
+        .channel = channel,
+        .phy = phy,
+        .modulation_index = 0, /* standard modulation index */
+    };
+    int rc = ble_dtm_rx_start(&p);
+    if(rc != 0) FURI_LOG_E(TAG, "DTM RX start rc=%d", rc);
+    return rc == 0;
+}
+
+bool nimble_glue_dtm_stop(uint16_t* out_packets) {
+    uint16_t packets = 0;
+    int rc = ble_dtm_stop(&packets);
+    if(rc != 0) FURI_LOG_E(TAG, "DTM stop rc=%d", rc);
+    if(out_packets) *out_packets = packets;
+    return rc == 0;
 }
 
 int nimble_glue_link_terminate(uint16_t conn_handle, uint8_t reason) {

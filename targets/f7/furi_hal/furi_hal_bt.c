@@ -233,11 +233,13 @@ bool furi_hal_bt_is_gatt_gap_supported(void) {
 }
 
 bool furi_hal_bt_is_testing_supported(void) {
-    if(furi_hal_bt.stack == FuriHalBtStackFull) {
+    /* The resident NimBLE host runs the packet tests through Direct Test Mode,
+     * which is standard HCI and works on the HCILayer radio (TASK-704). The
+     * carrier tests stay unavailable there; they were ST vendor commands. */
+    if(nimble_glue_is_synced()) {
         return true;
-    } else {
-        return false;
     }
+    return furi_hal_bt.stack == FuriHalBtStackFull;
 }
 
 bool furi_hal_bt_check_profile_type(
@@ -462,34 +464,52 @@ void furi_hal_bt_start_tone_tx(uint8_t channel, uint8_t power) {
 void furi_hal_bt_stop_tone_tx(void) {
 }
 
+/* Packet tests are standard HCI LE test commands, so NimBLE's Direct Test Mode
+ * drives them on the HCILayer radio (TASK-704). ble_dtm_stop reports the count,
+ * which the stock API asks for separately, so it is kept here. */
+static uint16_t furi_hal_bt_dtm_packets;
+
 void furi_hal_bt_start_packet_tx(uint8_t channel, uint8_t pattern, uint8_t datarate) {
-    UNUSED(channel);
-    UNUSED(pattern);
-    UNUSED(datarate);
+    furi_hal_bt_dtm_packets = 0;
+    if(nimble_glue_is_synced()) {
+        nimble_glue_dtm_tx_start(channel, pattern, datarate);
+        return;
+    }
     furi_hal_bt_no_radio_test("packet TX");
 }
 
 void furi_hal_bt_start_packet_rx(uint8_t channel, uint8_t datarate) {
-    UNUSED(channel);
-    UNUSED(datarate);
+    furi_hal_bt_dtm_packets = 0;
+    if(nimble_glue_is_synced()) {
+        nimble_glue_dtm_rx_start(channel, datarate);
+        return;
+    }
     furi_hal_bt_no_radio_test("packet RX");
 }
 
 uint16_t furi_hal_bt_stop_packet_test(void) {
+    if(nimble_glue_is_synced()) {
+        nimble_glue_dtm_stop(&furi_hal_bt_dtm_packets);
+        return furi_hal_bt_dtm_packets;
+    }
     return 0;
 }
 
 void furi_hal_bt_start_rx(uint8_t channel) {
     UNUSED(channel);
-    furi_hal_bt_no_radio_test("RX");
+    /* A continuous receive with no packet counting was an ST vendor command. */
+    furi_hal_bt_no_radio_test("continuous RX");
 }
 
 float furi_hal_bt_get_rssi(void) {
+    /* The raw radio RSSI during a test was an ST vendor command. The standard
+     * alternative, ble_gap_conn_rssi, needs a live connection, which a radio
+     * test does not have. */
     return 0.0f;
 }
 
 uint32_t furi_hal_bt_get_transmitted_packets(void) {
-    return 0;
+    return furi_hal_bt_dtm_packets;
 }
 
 void furi_hal_bt_stop_rx(void) {

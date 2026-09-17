@@ -139,6 +139,16 @@ uint32_t nimble_glue_rx_bytes(void);
  * again. Safe from any thread. */
 void nimble_glue_set_advertising_enabled(bool enabled);
 
+/* Direct Test Mode (TASK-704). These are the standard HCI LE test commands, so
+ * the HCILayer controller implements them; the ST vendor tone and raw-RSSI
+ * commands it does not have no equivalent here. Stop advertising and drop links
+ * first — the controller cannot run a test while it is doing anything else.
+ * phy is 1 for 1M and 2 for 2M; payload is the HCI packet payload type. */
+bool nimble_glue_dtm_tx_start(uint8_t channel, uint8_t payload, uint8_t phy);
+bool nimble_glue_dtm_rx_start(uint8_t channel, uint8_t phy);
+/* Ends the running test and reports how many packets it counted. */
+bool nimble_glue_dtm_stop(uint16_t* out_packets);
+
 /* Terminate the active connection, if any. */
 void nimble_glue_disconnect(void);
 
