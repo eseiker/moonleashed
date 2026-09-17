@@ -11,6 +11,19 @@ bool furi_ble_adv_set(const uint8_t* adv, uint8_t adv_len, const uint8_t* rsp, u
     return nimble_glue_adv_set_raw(adv, adv_len, rsp, rsp_len);
 }
 
+bool furi_ble_adv_set_ex(
+    const uint8_t* adv,
+    uint8_t adv_len,
+    const uint8_t* rsp,
+    uint8_t rsp_len,
+    bool stop_on_connect) {
+    return nimble_glue_adv_set_raw_ex(adv, adv_len, rsp, rsp_len, stop_on_connect);
+}
+
+void furi_ble_adv_restart(void) {
+    nimble_glue_adv_restart();
+}
+
 void furi_ble_adv_clear(void) {
     nimble_glue_adv_clear();
 }

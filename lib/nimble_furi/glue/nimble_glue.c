@@ -96,6 +96,13 @@ static struct {
     uint8_t custom_adv_len;
     uint8_t custom_rsp[31];
     uint8_t custom_rsp_len;
+    /* Advertise-once (TASK-721). A protocol that walks one connection per stage
+     * needs the advertisement to stop when a peer connects, the way a raw-HCI
+     * advertiser with auto_restart off behaves. While adv_halted is set,
+     * maybe_advertise does nothing; nimble_glue_adv_restart clears it. */
+    bool adv_stop_on_connect;
+    volatile bool adv_halted;
+    volatile bool adv_raw_queued;
     volatile uint32_t scan_count;
     uint8_t addr_type;
     uint8_t addr[6];
@@ -150,6 +157,17 @@ static void disconnect_event_fn(struct ble_npl_event* ev);
 static struct ble_npl_event disconnect_event;
 static void central_stop_event_fn(struct ble_npl_event* ev);
 static struct ble_npl_event central_stop_event;
+static void adv_raw_event_fn(struct ble_npl_event* ev);
+static struct ble_npl_event adv_raw_event;
+
+/* Re-advertise with whatever raw-advertising state the caller just set. The
+ * caller can be any thread, so the GAP calls run on the host thread (KNOW-703).
+ * Queuing twice is pointless: the handler always reads the current state. */
+static void adv_raw_apply(void) {
+    if(glue.adv_raw_queued) return;
+    glue.adv_raw_queued = true;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &adv_raw_event);
+}
 
 static void conn_handle_track(uint16_t handle, bool up) {
     for(size_t i = 0; i < COUNT_OF(glue.conn_handles); i++) {
@@ -166,11 +184,23 @@ static void conn_handle_track(uint16_t handle, bool up) {
 
 static void maybe_advertise(void) {
     if(glue.adv_disabled) return; /* Bluetooth is off in settings */
+    if(glue.adv_halted) return; /* advertise-once: waiting for an explicit restart */
     if(glue.central_probe) return; /* companion is suspended for a central scan */
     if(glue.gatt_rebuilding) return; /* table rebuild needs no GAP procedure */
     if(glue.advertising) return;
     if(glue.conn_count >= MYNEWT_VAL(BLE_MAX_CONNECTIONS)) return;
     start_advertise();
+}
+
+/* Host thread: apply raw-advertising state a caller set from another thread. */
+static void adv_raw_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    glue.adv_raw_queued = false;
+    if(glue.advertising) {
+        ble_gap_adv_stop();
+        glue.advertising = false;
+    }
+    maybe_advertise();
 }
 
 static int gap_event(struct ble_gap_event* event, void* arg) {
@@ -259,6 +289,13 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
                 "Peripheral link up, handle %u (links=%u)",
                 event->connect.conn_handle,
                 glue.conn_count);
+            /* Advertise-once (TASK-721): the caller asked for the raw-HCI
+             * behaviour, where a connection ends the advertisement and the
+             * protocol re-advertises between stages. */
+            if(glue.has_custom_adv && glue.adv_stop_on_connect) {
+                glue.adv_halted = true;
+                FURI_LOG_I(TAG, "Advertise-once: stopped after the link came up");
+            }
             maybe_advertise(); /* keep a slot open for a second incoming link */
         } else {
             FURI_LOG_W(TAG, "Connect failed: %d", event->connect.status);
@@ -596,6 +633,7 @@ bool nimble_glue_start(NimbleMode mode) {
     nimble_port_init();
     ble_npl_event_init(&gatt_rebuild_event, gatt_rebuild_event_fn, NULL);
     ble_npl_event_init(&adv_setting_event, adv_setting_event_fn, NULL);
+    ble_npl_event_init(&adv_raw_event, adv_raw_event_fn, NULL);
     ble_npl_event_init(&disconnect_event, disconnect_event_fn, NULL);
     ble_npl_event_init(&central_stop_event, central_stop_event_fn, NULL);
     ble_hs_cfg.reset_cb = on_reset;
@@ -694,21 +732,33 @@ bool nimble_glue_adv_set_raw(
     uint8_t adv_len,
     const uint8_t* rsp,
     uint8_t rsp_len) {
+    return nimble_glue_adv_set_raw_ex(adv, adv_len, rsp, rsp_len, false);
+}
+
+bool nimble_glue_adv_set_raw_ex(
+    const uint8_t* adv,
+    uint8_t adv_len,
+    const uint8_t* rsp,
+    uint8_t rsp_len,
+    bool stop_on_connect) {
     if(adv_len > sizeof(glue.custom_adv) || rsp_len > sizeof(glue.custom_rsp)) return false;
     if((adv_len && !adv) || (rsp_len && !rsp)) return false;
     if(adv_len) memcpy(glue.custom_adv, adv, adv_len);
     glue.custom_adv_len = adv_len;
     if(rsp_len) memcpy(glue.custom_rsp, rsp, rsp_len);
     glue.custom_rsp_len = rsp_len;
+    glue.adv_stop_on_connect = stop_on_connect;
     glue.has_custom_adv = true;
-    /* Re-advertise with the new payload (maybe_advertise respects the central
-     * suspend and the link budget). */
-    if(glue.advertising) {
-        ble_gap_adv_stop();
-        glue.advertising = false;
-    }
-    maybe_advertise();
+    glue.adv_halted = false;
+    /* Re-advertise with the new payload on the host thread (maybe_advertise
+     * respects the central suspend and the link budget). */
+    adv_raw_apply();
     return true;
+}
+
+void nimble_glue_adv_restart(void) {
+    glue.adv_halted = false;
+    adv_raw_apply();
 }
 
 void nimble_glue_adv_clear(void) {
@@ -716,11 +766,9 @@ void nimble_glue_adv_clear(void) {
     glue.has_custom_adv = false;
     glue.custom_adv_len = 0;
     glue.custom_rsp_len = 0;
-    if(glue.advertising) {
-        ble_gap_adv_stop();
-        glue.advertising = false;
-    }
-    maybe_advertise(); /* back to the companion advertisement */
+    glue.adv_stop_on_connect = false;
+    glue.adv_halted = false;
+    adv_raw_apply(); /* back to the companion advertisement */
 }
 
 bool nimble_glue_central_probe_start(void) {

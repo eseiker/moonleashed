@@ -1,5 +1,5 @@
 entry,status,name,type,params
-Version,+,88.21,,
+Version,+,88.22,,
 Header,+,applications/drivers/subghz/cc1101_ext/cc1101_ext_interconnect.h,,
 Header,+,applications/services/applications.h,,
 Header,+,applications/services/bt/bt_service/bt.h,,
@@ -1462,7 +1462,9 @@ Function,-,funlockfile,void,FILE*
 Function,-,funopen,FILE*,"const void*, int (*)(void*, char*, int), int (*)(void*, const char*, int), fpos_t (*)(void*, fpos_t, int), int (*)(void*)"
 Function,-,furi_background,void,
 Function,+,furi_ble_adv_clear,void,
+Function,+,furi_ble_adv_restart,void,
 Function,+,furi_ble_adv_set,_Bool,"const uint8_t*, uint8_t, const uint8_t*, uint8_t"
+Function,+,furi_ble_adv_set_ex,_Bool,"const uint8_t*, uint8_t, const uint8_t*, uint8_t, _Bool"
 Function,+,furi_ble_session_alloc,FuriBleSession*,const FuriBleSessionConfig*
 Function,+,furi_ble_session_conn_handle,uint16_t,FuriBleSession*
 Function,+,furi_ble_session_free,void,FuriBleSession*

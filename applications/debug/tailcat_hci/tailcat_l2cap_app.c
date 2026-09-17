@@ -601,18 +601,30 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
         }
         break;
     case L2F_ADVERTISE:
+    case L2F_ADVERTISE_ONCE:
         /* [adv_len:1][adv...][rsp...]: install the caller's advertisement (e.g.
-         * the DCT FC73 session adv) on the resident host so peers discover us. */
+         * the DCT FC73 session adv) on the resident host so peers discover us.
+         * ADVERTISE_ONCE stops it when the first peer connects (TASK-721). */
         if(f->len >= 1 && (uint16_t)(1 + f->data[0]) <= f->len) {
             uint8_t adv_len = f->data[0];
             const uint8_t* adv = f->data + 1;
             const uint8_t* rsp = f->data + 1 + adv_len;
             uint16_t rsp_len = f->len - 1 - adv_len;
-            if(rsp_len > 31 || !furi_ble_adv_set(adv, adv_len, rsp, (uint8_t)rsp_len)) {
+            bool once = f->type == L2F_ADVERTISE_ONCE;
+            if(rsp_len > 31 || !furi_ble_adv_set_ex(adv, adv_len, rsp, (uint8_t)rsp_len, once)) {
                 uint8_t code[2] = {0x01, 0x00};
                 l2_emit(app, L2F_ERROR, code, sizeof(code));
             }
         }
+        break;
+    case L2F_ADV_RESTART:
+        /* []: advertise the installed payload again, which is how the stage
+         * machine re-arms between stages after ADVERTISE_ONCE stopped it. */
+        furi_ble_adv_restart();
+        break;
+    case L2F_ADV_STOP:
+        /* []: drop the raw payload; the companion advertisement comes back. */
+        furi_ble_adv_clear();
         break;
     case L2F_CONNECT: {
         /* [psm:2][name...]: suspend the companion, scan for `name`, connect as

@@ -72,6 +72,22 @@ bool nimble_glue_adv_set_raw(
     uint8_t adv_len,
     const uint8_t* rsp,
     uint8_t rsp_len);
+
+/* Same, with the advertise-once mode (TASK-721). When stop_on_connect is true,
+ * the advertisement ends as soon as a peer connects and stays off until
+ * nimble_glue_adv_restart, which is how a raw-HCI advertiser with auto_restart
+ * off behaves. A protocol that expects one connection per stage needs that.
+ * When it is false the host keeps advertising, which is the old behaviour. */
+bool nimble_glue_adv_set_raw_ex(
+    const uint8_t* adv,
+    uint8_t adv_len,
+    const uint8_t* rsp,
+    uint8_t rsp_len,
+    bool stop_on_connect);
+
+/* Advertise the installed payload again after advertise-once stopped it. */
+void nimble_glue_adv_restart(void);
+
 void nimble_glue_adv_clear(void);
 
 /* Rebuild the GATT table so dynamic services (dyn_gatt.h) go live (TASK-632).

@@ -27,7 +27,15 @@ _Static_assert(L2F_COC_MTU + 1U <= L2F_PAYLOAD_MAX, "CoC MTU + channel byte must
 #define L2F_CLOSE  0x03 /* [channel:1]                 disconnect a channel */
 #define L2F_CONNECT \
     0x04 /* [psm:2][name...]            central: scan+connect, then CoC client on psm */
-#define L2F_ADVERTISE 0x05 /* [adv_len:1][adv...][rsp...] install raw advertisement */
+#define L2F_ADVERTISE      0x05 /* [adv_len:1][adv...][rsp...] install raw advertisement */
+/* Advertise-once (TASK-721, KNOW-720). ADVERTISE_ONCE takes the same payload as
+ * ADVERTISE, but the advertisement stops when the first peer connects, the way a
+ * raw-HCI advertiser with auto_restart off behaves. A protocol that expects one
+ * connection per stage needs that, and re-arms with ADV_RESTART between stages.
+ * ADV_STOP drops the raw payload, so the companion advertisement comes back. */
+#define L2F_ADVERTISE_ONCE 0x06 /* [adv_len:1][adv...][rsp...] */
+#define L2F_ADV_RESTART    0x07 /* []                          */
+#define L2F_ADV_STOP       0x08 /* []                          */
 
 /* Fixed L2CAP CID relay (TASK-663), a separate family from the CoC frames so
  * their numbering is untouched. These carry a raw L2CAP CID and a connection
