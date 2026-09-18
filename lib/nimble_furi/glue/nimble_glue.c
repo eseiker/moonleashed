@@ -1043,10 +1043,12 @@ static int central_gap_event(struct ble_gap_event* event, void* arg) {
         return 0;
 
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        /* Same as the peripheral handler above: delete the stored records only,
+         * because ble_gap_unpair terminates the link first (TASK-763). */
         sm_glue_on_repeat_pairing(event->repeat_pairing.conn_handle);
         struct ble_gap_conn_desc desc;
         if(ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
-            ble_gap_unpair(&desc.peer_id_addr);
+            ble_store_util_delete_peer(&desc.peer_id_addr);
         }
         return BLE_GAP_REPEAT_PAIRING_RETRY;
     }
