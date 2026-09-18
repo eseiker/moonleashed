@@ -407,11 +407,17 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
 
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
         /* The peer re-pairs while a bond already exists (RAM store lost it, or
-         * the phone forgot). Drop the stale bond and let pairing proceed. */
+         * the phone forgot). Drop the stale bond and let pairing proceed.
+         *
+         * Delete the stored records only. ble_gap_unpair looks the connection up
+         * and terminates it before deleting, so it dropped the very link this
+         * retry continues on, and an enrollment died at the reciprocal stage
+         * with local reason 22 (TASK-763, KNOW-758). Upstream's bleprph calls
+         * ble_store_util_delete_peer here for the same reason. */
         sm_glue_on_repeat_pairing(event->repeat_pairing.conn_handle);
         struct ble_gap_conn_desc desc;
         if(ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
-            ble_gap_unpair(&desc.peer_id_addr);
+            ble_store_util_delete_peer(&desc.peer_id_addr);
         }
         return BLE_GAP_REPEAT_PAIRING_RETRY;
     }
