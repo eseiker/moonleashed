@@ -85,6 +85,19 @@ bool nimble_glue_adv_set_raw_ex(
     uint8_t rsp_len,
     bool stop_on_connect);
 
+/* Advertise the HID Service and the keyboard appearance, or not (TASK-765).
+ * Off by default: a phone that sees a keyboard runs its keyboard pairing flow,
+ * where the phone displays the passkey and the keyboard types it, and the
+ * companion cannot type. The bt service turns it on while a HID app runs. */
+void nimble_glue_set_hid_advertised(bool advertised);
+
+/* Numeric comparison pairing (TASK-765). While pending, both ends show the same
+ * six-digit number, which nimble_glue_passkey returns, and the user has to
+ * confirm it. Answer with nimble_glue_numcmp_reply from any thread; the answer
+ * reaches NimBLE on its host thread. */
+bool nimble_glue_numcmp_pending(void);
+void nimble_glue_numcmp_reply(bool accept);
+
 /* Advertise the installed payload again after advertise-once stopped it. */
 void nimble_glue_adv_restart(void);
 

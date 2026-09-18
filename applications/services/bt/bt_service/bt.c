@@ -171,6 +171,7 @@ Bt* bt_alloc(void) {
     bt->nimble_pin_shown = false;
     bt->nimble_profile_started = false;
     bt->controller_released = false;
+    bt->nimble_numcmp_shown = false;
     // Keys storage
     bt->keys_storage = bt_keys_storage_alloc(BT_KEYS_STORAGE_PATH);
     // Alloc queue
@@ -453,9 +454,15 @@ static void bt_nimble_change_profile(Bt* bt, BtMessage* message) {
         static FuriHalBleProfileBase nimble_serial_profile;
         nimble_serial_profile.config = ble_profile_serial;
         instance = &nimble_serial_profile;
+        /* Back to the companion: stop advertising as a keyboard (TASK-765). */
+        nimble_glue_set_hid_advertised(false);
     } else if(ble_gatt_host_shim_active() && template->start) {
         instance = template->start(message->data.profile.params);
         bt->nimble_profile_started = (instance != NULL);
+        /* An app profile is running, e.g. the BLE remote. Advertise the HID
+         * Service and the keyboard appearance so a host offers the Flipper as
+         * an input device; the companion advertisement does not (TASK-765). */
+        nimble_glue_set_hid_advertised(instance != NULL);
         FURI_LOG_D(TAG, "NimBLE: app profile start -> %p", (void*)instance);
     } else {
         FURI_LOG_E(TAG, "NimBLE: GATT host shim not installed; profile unavailable");
@@ -739,6 +746,19 @@ static void bt_nimble_poll_callback(void* context) {
         furi_message_queue_put(bt->message_queue, &message, 0);
     }
 
+    // Numeric comparison (TASK-765): the phone shows the same number, and the
+    // user confirms it here. Ask once per pairing.
+    if(nimble_glue_numcmp_pending()) {
+        if(!bt->nimble_numcmp_shown) {
+            bt->nimble_numcmp_shown = true;
+            const BtMessage message = {
+                .type = BtMessageTypeNumericComparison, .data.pin_code = nimble_glue_passkey()};
+            furi_message_queue_put(bt->message_queue, &message, 0);
+        }
+        return;
+    }
+    bt->nimble_numcmp_shown = false;
+
     // Legacy passkey pairing shows a 6-digit code (DISPLAY_ONLY). Surface it on
     // the PIN screen while pairing, and hide it once pairing ends.
     if(nimble_glue_is_pairing()) {
@@ -936,6 +956,11 @@ int32_t bt_srv(void* p) {
             message.type == BtMessageTypeUpdatePowerState && !bt->profile_suspended &&
             !bt->nimble_active) {
             furi_hal_bt_update_power_state(message.data.power_state_charging);
+        } else if(message.type == BtMessageTypeNumericComparison) {
+            /* Blocks this thread while the dialog is up, like the stock verify
+             * path did from its GAP callback. */
+            bool accept = bt_pin_code_verify_event_handler(bt, message.data.pin_code);
+            nimble_glue_numcmp_reply(accept);
         } else if(message.type == BtMessageTypePinCodeShow && !bt->profile_suspended) {
             // Display PIN code
             bt_pin_code_show(bt, message.data.pin_code);

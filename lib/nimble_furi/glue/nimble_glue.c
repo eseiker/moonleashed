@@ -103,6 +103,14 @@ static struct {
     bool adv_stop_on_connect;
     volatile bool adv_halted;
     volatile bool adv_raw_queued;
+    /* True while a HID app runs, which is the only time the advertisement says
+     * this is a keyboard (TASK-765). */
+    volatile bool hid_advertised;
+    /* Numeric comparison awaiting the user's answer (TASK-765). */
+    volatile bool numcmp_pending;
+    volatile bool numcmp_accept;
+    volatile bool numcmp_queued;
+    uint16_t numcmp_conn;
     volatile uint32_t scan_count;
     uint8_t addr_type;
     uint8_t addr[6];
@@ -159,6 +167,8 @@ static void central_stop_event_fn(struct ble_npl_event* ev);
 static struct ble_npl_event central_stop_event;
 static void adv_raw_event_fn(struct ble_npl_event* ev);
 static struct ble_npl_event adv_raw_event;
+static void numcmp_event_fn(struct ble_npl_event* ev);
+static struct ble_npl_event numcmp_event;
 
 /* Re-advertise with whatever raw-advertising state the caller just set. The
  * caller can be any thread, so the GAP calls run on the host thread (KNOW-703).
@@ -190,6 +200,21 @@ static void maybe_advertise(void) {
     if(glue.advertising) return;
     if(glue.conn_count >= MYNEWT_VAL(BLE_MAX_CONNECTIONS)) return;
     start_advertise();
+}
+
+/* Host thread: answer the numeric comparison the user just decided (TASK-765).
+ * ble_sm_inject_io takes the ble_hs lock, so it never runs on the UI thread
+ * (KNOW-703). */
+static void numcmp_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    glue.numcmp_queued = false;
+    if(!glue.numcmp_pending) return;
+    glue.numcmp_pending = false;
+    struct ble_sm_io io = {0};
+    io.action = BLE_SM_IOACT_NUMCMP;
+    io.numcmp_accept = glue.numcmp_accept;
+    int rc = ble_sm_inject_io(glue.numcmp_conn, &io);
+    FURI_LOG_I(TAG, "Numcmp %d rc %d", glue.numcmp_accept, rc);
 }
 
 /* Host thread: apply raw-advertising state a caller set from another thread. */
@@ -380,7 +405,15 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             glue.pairing = true;
             int rc = ble_sm_inject_io(event->passkey.conn_handle, &io);
             FURI_LOG_I(TAG, "Passkey display %06lu (inject rc %d)", io.passkey, rc);
-        }
+        } else if(event->passkey.params.action == BLE_SM_IOACT_NUMCMP) {
+            /* Numeric comparison (TASK-765): both ends show the same number and
+             * the user confirms it. Record it for the Flipper's screen and wait
+             * for the answer; nimble_glue_numcmp_reply injects it. */
+            glue.passkey = event->passkey.params.numcmp;
+            glue.pairing = true;
+            glue.numcmp_conn = event->passkey.conn_handle;
+            glue.numcmp_pending = true;
+                }
         break;
 
     case BLE_GAP_EVENT_ENC_CHANGE: {
@@ -472,7 +505,14 @@ static void start_advertise(void) {
         uint16_t svc16 = 0x3080 | (uint16_t)furi_hal_version_get_hw_color();
         adv_uuids[n_uuids++] = (ble_uuid16_t)BLE_UUID16_INIT(svc16);
     }
-    if(nimble_mode_has_hid(glue.mode)) {
+    /* Only claim to be a HID device while a HID app is actually running
+     * (TASK-765). A phone that sees the HID Service and the keyboard appearance
+     * classifies the Flipper as an input device and then runs its keyboard
+     * pairing flow, where the phone displays the passkey and expects the
+     * keyboard to type it. Android does exactly that, so every companion bond
+     * failed with a confirm mismatch. The stock firmware advertises the serial
+     * profile and switches to HID only when the remote app starts. */
+    if(nimble_mode_has_hid(glue.mode) && glue.hid_advertised) {
         adv_uuids[n_uuids++] = (ble_uuid16_t)BLE_UUID16_INIT(0x1812);
     }
     fields.uuids16 = adv_uuids;
@@ -496,7 +536,8 @@ static void start_advertise(void) {
     memset(&rsp, 0, sizeof(rsp));
     /* Advertise a keyboard appearance when HID is exposed so hosts offer BLE HID
      * pairing; otherwise the generic Flipper appearance. */
-    rsp.appearance = nimble_mode_has_hid(glue.mode) ? 0x03C1 : 0x8600;
+    /* 0x03C1 is the HID keyboard appearance; see the HID Service UUID above. */
+    rsp.appearance = (nimble_mode_has_hid(glue.mode) && glue.hid_advertised) ? 0x03C1 : 0x8600;
     rsp.appearance_is_present = 1;
     ble_gap_adv_rsp_set_fields(&rsp);
 
@@ -640,6 +681,7 @@ bool nimble_glue_start(NimbleMode mode) {
     ble_npl_event_init(&gatt_rebuild_event, gatt_rebuild_event_fn, NULL);
     ble_npl_event_init(&adv_setting_event, adv_setting_event_fn, NULL);
     ble_npl_event_init(&adv_raw_event, adv_raw_event_fn, NULL);
+    ble_npl_event_init(&numcmp_event, numcmp_event_fn, NULL);
     ble_npl_event_init(&disconnect_event, disconnect_event_fn, NULL);
     ble_npl_event_init(&central_stop_event, central_stop_event_fn, NULL);
     ble_hs_cfg.reset_cb = on_reset;
@@ -649,10 +691,14 @@ bool nimble_glue_start(NimbleMode mode) {
      * profile (GapPairingPinCodeShow). MITM makes the resulting LTK
      * authenticated, which the Serial Service's AUTHEN characteristics require.
      * Distribute and accept the encryption and identity keys. */
+    /* The Flipper displays a passkey and the phone types it, which is the flow
+     * the companion has always used. Secure Connections is allowed as well, the
+     * way the stock firmware allows it, and its P-256 runs on the PKA; a peer
+     * that picks numeric comparison instead is answered from the screen. */
     ble_hs_cfg.sm_io_cap = BLE_HS_IO_DISPLAY_ONLY;
     ble_hs_cfg.sm_bonding = 1;
     ble_hs_cfg.sm_mitm = 1;
-    ble_hs_cfg.sm_sc = 0;
+    ble_hs_cfg.sm_sc = 1;
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
@@ -770,6 +816,23 @@ bool nimble_glue_adv_set_raw_ex(
      * respects the central suspend and the link budget). */
     adv_raw_apply();
     return true;
+}
+
+void nimble_glue_set_hid_advertised(bool advertised) {
+    if(glue.hid_advertised == advertised) return;
+    glue.hid_advertised = advertised;
+    adv_raw_apply(); /* re-advertise with the new identity, on the host thread */
+}
+
+bool nimble_glue_numcmp_pending(void) {
+    return glue.numcmp_pending;
+}
+
+void nimble_glue_numcmp_reply(bool accept) {
+    if(!glue.numcmp_pending || glue.numcmp_queued) return;
+    glue.numcmp_accept = accept;
+    glue.numcmp_queued = true;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &numcmp_event);
 }
 
 void nimble_glue_adv_restart(void) {

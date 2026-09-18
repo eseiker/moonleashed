@@ -38,6 +38,8 @@ typedef enum {
     BtMessageTypeSetSettings,
     BtMessageTypeReloadKeysSettings,
     /* Controller handover to a raw-HCI app (TASK-759). */
+    /* Numeric comparison pairing: show the number and ask (TASK-765). */
+    BtMessageTypeNumericComparison,
     BtMessageTypeReleaseController,
     BtMessageTypeReclaimController,
 } BtMessageType;
@@ -110,6 +112,9 @@ struct Bt {
     // True while a raw-HCI app owns the controller and the NimBLE host is down
     // (TASK-759). The service brings the host back when the app gives it back.
     bool controller_released;
+    // True while the numeric comparison dialog is up, so the poll does not ask
+    // twice for the same pairing (TASK-765).
+    bool nimble_numcmp_shown;
 };
 
 /** Open a new RPC connection
