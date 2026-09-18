@@ -270,6 +270,16 @@ static usbd_respond usb_descriptor_get(usbd_ctlreq* req, void** address, uint16_
             desc = usb.interface->str_prod_descr;
         } else if((dnumber == UsbDevSerial) && (usb.interface->str_serial_descr != NULL)) {
             desc = usb.interface->str_serial_descr;
+        } else if((dnumber >= UsbDevIfaceFirst) && (usb.interface->str_iface_descr != NULL)) {
+            /* Interface names, so a composite device does not show the same
+             * label for every port. The array is NULL-terminated. */
+            void** names = usb.interface->str_iface_descr;
+            uint8_t idx = dnumber - UsbDevIfaceFirst;
+            for(uint8_t i = 0; i < idx; i++) {
+                if(names[i] == NULL) return usbd_fail;
+            }
+            if(names[idx] == NULL) return usbd_fail;
+            desc = names[idx];
         } else
             return usbd_fail;
         break;

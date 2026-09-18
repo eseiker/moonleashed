@@ -21,6 +21,12 @@ struct FuriHalUsbInterface {
     void* str_serial_descr;
 
     void* cfg_descr;
+
+    /** Optional names for the interfaces of this mode, served as string
+     *  descriptor indices 4 and up, NULL-terminated. Without them every
+     *  interface of a composite device falls back to the product string, so a
+     *  host serial picker shows the same label twice. */
+    void** str_iface_descr;
 };
 
 /** USB device interface modes */
