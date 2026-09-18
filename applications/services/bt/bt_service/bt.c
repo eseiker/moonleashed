@@ -170,6 +170,7 @@ Bt* bt_alloc(void) {
     bt->nimble_last_status = BtStatusUnavailable;
     bt->nimble_pin_shown = false;
     bt->nimble_profile_started = false;
+    bt->controller_released = false;
     // Keys storage
     bt->keys_storage = bt_keys_storage_alloc(BT_KEYS_STORAGE_PATH);
     // Alloc queue
@@ -519,6 +520,7 @@ static void bt_change_profile(Bt* bt, BtMessage* message) {
 
 static void bt_close_connection(Bt* bt);
 static void bt_apply_settings(Bt* bt);
+static bool bt_nimble_bringup(Bt* bt);
 
 static void bt_suspend_profile(Bt* bt, BtMessage* message) {
     bool result = !bt->profile_suspended;
@@ -565,6 +567,61 @@ static void bt_close_connection(Bt* bt) {
     }
     bt_close_rpc_connection(bt);
     furi_hal_bt_stop_advertising();
+}
+
+/* Hand the controller to a raw-HCI app (TASK-759). The app then acquires it
+ * with furi_hal_bt_hci_acquire and speaks H4 to an external host. Runs on the bt
+ * thread, so no other bt work overlaps the teardown. */
+static bool bt_handle_release_controller(Bt* bt) {
+    if(bt->controller_released) return true; /* already handed over */
+    if(!bt->nimble_active) {
+        /* Nothing resident owns the controller: raw-HCI mode at boot, or a
+         * device where the host never started. The app can take it directly. */
+        bt->controller_released = true;
+        return true;
+    }
+
+    bt_close_rpc_connection(bt);
+    if(bt->nimble_timer) {
+        furi_timer_stop(bt->nimble_timer);
+        furi_timer_free(bt->nimble_timer);
+        bt->nimble_timer = NULL;
+    }
+    ble_gatt_host_shim_set(NULL);
+    nimble_glue_stop();
+    if(!furi_hal_bt_hci_release()) {
+        FURI_LOG_E(TAG, "Controller release failed");
+        bt->nimble_active = false;
+        bt->status = BtStatusUnavailable;
+        return false;
+    }
+
+    bt->nimble_active = false;
+    bt->controller_released = true;
+    bt->nimble_profile_started = false;
+    bt->status = BtStatusOff;
+    bt_statusbar_update(bt);
+    return true;
+}
+
+/* Take the controller back once the raw-HCI app is done with it. */
+static bool bt_handle_reclaim_controller(Bt* bt) {
+    if(!bt->controller_released) return true;
+    bt->controller_released = false;
+
+    if(bt->bt_settings.ble_mode == NimbleModeRawHci) {
+        /* The device is configured to leave the controller free, so bringing the
+         * host back would contradict the setting. */
+        return true;
+    }
+    if(!bt_nimble_bringup(bt)) {
+        FURI_LOG_E(TAG, "NimBLE restart failed");
+        bt->status = BtStatusUnavailable;
+        return false;
+    }
+    /* A restarted host advertises by default, so re-apply the user's setting. */
+    bt_apply_settings(bt);
+    return true;
 }
 
 static void bt_apply_settings(Bt* bt) {
@@ -843,7 +900,20 @@ int32_t bt_srv(void* p) {
             message.type,
             (void*)message.lock,
             (void*)message.result);
-        if(message.type == BtMessageTypeSuspendProfile) {
+        if(message.type == BtMessageTypeReleaseController) {
+            bool ok = bt_handle_release_controller(bt);
+            if(message.result) *message.result = ok;
+        } else if(message.type == BtMessageTypeReclaimController) {
+            bool ok = bt_handle_reclaim_controller(bt);
+            if(message.result) *message.result = ok;
+        } else if(bt->controller_released) {
+            /* A raw-HCI app owns the controller: every BLE-facing message would
+             * drive a transport this service no longer holds (KNOW-503). Drop
+             * them, but keep answering the settings reads that touch no radio. */
+            if(message.type == BtMessageTypeGetSettings) {
+                bt_handle_get_settings(bt, &message);
+            }
+        } else if(message.type == BtMessageTypeSuspendProfile) {
             bt_suspend_profile(bt, &message);
         } else if(message.type == BtMessageTypeResumeDefaultProfile) {
             bt_resume_default_profile(bt, &message);

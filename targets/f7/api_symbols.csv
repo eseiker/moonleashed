@@ -1,5 +1,5 @@
 entry,status,name,type,params
-Version,+,88.22,,
+Version,+,88.23,,
 Header,+,applications/drivers/subghz/cc1101_ext/cc1101_ext_interconnect.h,,
 Header,+,applications/services/applications.h,,
 Header,+,applications/services/bt/bt_service/bt.h,,
@@ -921,6 +921,8 @@ Function,+,ble_svc_serial_stop,void,BleServiceSerial*
 Function,+,ble_svc_serial_update_tx,_Bool,"BleServiceSerial*, uint8_t*, uint16_t"
 Function,-,bsearch,void*,"const void*, const void*, size_t, size_t, __compar_fn_t"
 Function,+,bt_disconnect,void,Bt*
+Function,+,bt_reclaim_controller,_Bool,Bt*
+Function,+,bt_release_controller_to_raw_hci,_Bool,Bt*
 Function,+,bt_forget_bonded_devices,void,Bt*
 Function,+,bt_get_settings,void,"Bt*, BtSettings*"
 Function,+,bt_keys_storage_alloc,BtKeysStorage*,const char*

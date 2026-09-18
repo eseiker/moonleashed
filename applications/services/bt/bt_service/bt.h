@@ -89,6 +89,30 @@ void bt_set_status_changed_callback(Bt* bt, BtStatusChangedCallback callback, vo
  */
 void bt_forget_bonded_devices(Bt* bt);
 
+/** Hand the BLE controller to a raw-HCI app (TASK-759).
+ *
+ * The resident NimBLE host stops and the controller is released, so the caller
+ * can take it with furi_hal_bt_hci_acquire and speak H4 to an external host.
+ * Bluetooth is unavailable until bt_reclaim_controller returns it. Calling this
+ * twice is harmless. Returns false if the controller could not be released, in
+ * which case BLE stays down until the device reboots.
+ *
+ * @param bt                    Bt instance
+ * @return                      true if the controller is free for the caller
+ */
+bool bt_release_controller_to_raw_hci(Bt* bt);
+
+/** Take the controller back and restart the resident NimBLE host.
+ *
+ * The caller must have released the controller with furi_hal_bt_hci_release
+ * first. Returns false if the host did not come back, which leaves Bluetooth
+ * unavailable until the device reboots.
+ *
+ * @param bt                    Bt instance
+ * @return                      true if the host is running again
+ */
+bool bt_reclaim_controller(Bt* bt);
+
 /** Set keys storage file path
  *
  * @param bt                    Bt instance

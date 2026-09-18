@@ -650,6 +650,16 @@ bool nimble_glue_start(NimbleMode mode) {
     ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
 
+    /* A restart must not stack a second GATT table on the first (TASK-759). The
+     * service definitions live in static lists that survive nimble_glue_stop, so
+     * drop them here, with the same counter reset the rebuild path needs on
+     * NimBLE 1.10.0 (see gatt_rebuild_now). The first start has nothing to drop
+     * and ble_gatts_reset then does nothing. */
+    ble_gatts_reset();
+    ble_hs_max_attrs = 0;
+    ble_hs_max_services = 0;
+    ble_hs_max_client_configs = 0;
+
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_store_config_init();

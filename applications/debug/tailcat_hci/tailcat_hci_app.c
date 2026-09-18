@@ -4,6 +4,7 @@
 #include <furi_hal_bt_hci.h>
 #include <gui/gui.h>
 #include <cli/cli_vcp.h>
+#include <bt/bt_service/bt.h>
 #include "h4_frame.h"
 
 #define TAILCAT_HCI_DEFAULT_RUNTIME_SECONDS 180UL
@@ -114,10 +115,20 @@ static uint32_t runtime_seconds_from_context(const void* context) {
 
 int32_t tailcat_hci_app(void* context) {
     const uint32_t runtime_seconds = runtime_seconds_from_context(context);
+    /* The resident NimBLE host owns the controller, so ask the bt service to
+     * stop it and hand the controller over (TASK-759). The service brings the
+     * host back when this app returns it below. */
+    Bt* bt = furi_record_open(RECORD_BT);
+    if(!bt_release_controller_to_raw_hci(bt)) {
+        FURI_LOG_E("TailcatHci", "The bt service could not release the controller");
+        furi_record_close(RECORD_BT);
+        return -1;
+    }
     if(furi_hal_bt_hci_get_abi() != FURI_HAL_BT_HCI_ABI ||
        !furi_hal_bt_hci_acquire(FURI_HAL_BT_HCI_ABI)) {
         FURI_LOG_E("TailcatHci", "HCILayer 1.20.0 controller unavailable");
-        furi_hal_power_reset();
+        bt_reclaim_controller(bt);
+        furi_record_close(RECORD_BT);
         return -1;
     }
     HciApp* app = malloc(sizeof(HciApp));
@@ -163,6 +174,10 @@ int32_t tailcat_hci_app(void* context) {
         }
     }
     bool reset_ok = furi_hal_bt_hci_release();
+    /* Give the controller back: the bt service restarts the NimBLE host, so
+     * Bluetooth works again without a reboot. */
+    if(reset_ok) bt_reclaim_controller(bt);
+    furi_record_close(RECORD_BT);
     gui_remove_view_port(gui, viewport);
     view_port_free(viewport);
     furi_record_close(RECORD_GUI);

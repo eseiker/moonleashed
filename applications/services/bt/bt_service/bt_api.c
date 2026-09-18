@@ -71,6 +71,28 @@ void bt_set_status_changed_callback(Bt* bt, BtStatusChangedCallback callback, vo
     bt->status_changed_ctx = context;
 }
 
+static bool bt_controller_message(Bt* bt, BtMessageType type) {
+    furi_check(bt);
+    bool result = false;
+    BtMessage message = {
+        .lock = api_lock_alloc_locked(),
+        .type = type,
+        .result = &result,
+    };
+    furi_check(
+        furi_message_queue_put(bt->message_queue, &message, FuriWaitForever) == FuriStatusOk);
+    api_lock_wait_unlock_and_free(message.lock);
+    return result;
+}
+
+bool bt_release_controller_to_raw_hci(Bt* bt) {
+    return bt_controller_message(bt, BtMessageTypeReleaseController);
+}
+
+bool bt_reclaim_controller(Bt* bt) {
+    return bt_controller_message(bt, BtMessageTypeReclaimController);
+}
+
 void bt_forget_bonded_devices(Bt* bt) {
     furi_check(bt);
     BtMessage message = {.type = BtMessageTypeForgetBondedDevices};

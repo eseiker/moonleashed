@@ -37,6 +37,9 @@ typedef enum {
     BtMessageTypeGetSettings,
     BtMessageTypeSetSettings,
     BtMessageTypeReloadKeysSettings,
+    /* Controller handover to a raw-HCI app (TASK-759). */
+    BtMessageTypeReleaseController,
+    BtMessageTypeReclaimController,
 } BtMessageType;
 
 typedef struct {
@@ -104,6 +107,9 @@ struct Bt {
     // template's start() (run over the ble_gatt_* host shim, TASK-612) and must
     // be stopped with current_profile->config->stop() before it is replaced.
     bool nimble_profile_started;
+    // True while a raw-HCI app owns the controller and the NimBLE host is down
+    // (TASK-759). The service brings the host back when the app gives it back.
+    bool controller_released;
 };
 
 /** Open a new RPC connection
