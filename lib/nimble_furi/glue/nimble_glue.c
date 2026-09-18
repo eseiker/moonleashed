@@ -48,6 +48,7 @@
 #include "dyn_gatt.h"
 #include "fixedcid_glue.h"
 #include "sm_glue.h"
+#include "msys_pool.h"
 
 #define TAG "NimbleGlue"
 
@@ -678,6 +679,13 @@ bool nimble_glue_start(NimbleMode mode) {
     dyn_gatt_init();
 
     nimble_port_init();
+    /* Register the mbuf pool from the radio core's spare SRAM2 (TASK-785).
+     * nimble_port_init calls os_msys_init, which resets the pool list, so this
+     * has to come after it. */
+    if(!msys_pool_init()) {
+        FURI_LOG_E(TAG, "msys pool unavailable");
+        return false;
+    }
     ble_npl_event_init(&gatt_rebuild_event, gatt_rebuild_event_fn, NULL);
     ble_npl_event_init(&adv_setting_event, adv_setting_event_fn, NULL);
     ble_npl_event_init(&adv_raw_event, adv_raw_event_fn, NULL);

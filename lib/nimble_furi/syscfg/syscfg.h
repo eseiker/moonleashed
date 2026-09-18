@@ -397,7 +397,12 @@
 
 #ifndef MYNEWT_VAL_MSYS_1_BLOCK_COUNT
 /* More mbufs: two connections plus CoC SDU/PDU traffic (TASK-615). */
-#define MYNEWT_VAL_MSYS_1_BLOCK_COUNT (24)
+/* Zero so upstream's os_msys.c instantiates no static pool (TASK-785).
+ * lib/nimble_furi/glue/msys_pool.c registers the same 24 blocks from the SRAM2
+ * the radio core leaves free, which keeps 7,008 bytes out of this core's RAM.
+ * MSYS_1_BLOCK_SIZE below still sets the block size, and BLE_L2CAP_COC_MPS
+ * still derives from it. */
+#define MYNEWT_VAL_MSYS_1_BLOCK_COUNT (0)
 #endif
 
 #ifndef MYNEWT_VAL_MSYS_1_BLOCK_SIZE
@@ -1538,16 +1543,20 @@
 #define MYNEWT_VAL_BLE_TRANSPORT_HS (1)
 #endif
 
+/* No isochronous channels here (TASK-785). The HCILayer controller has none and
+ * nimble_transport_furi refuses ISO, but transport.c still reserved 10 buffers
+ * of 300 bytes, which is 3,480 bytes of RAM. Upstream guards the pool with
+ * `#if POOL_ISO_COUNT > 0`, so zero removes it. */
 #ifndef MYNEWT_VAL_BLE_TRANSPORT_ISO_COUNT
-#define MYNEWT_VAL_BLE_TRANSPORT_ISO_COUNT (10)
+#define MYNEWT_VAL_BLE_TRANSPORT_ISO_COUNT (0)
 #endif
 
 #ifndef MYNEWT_VAL_BLE_TRANSPORT_ISO_FROM_HS_COUNT
-#define MYNEWT_VAL_BLE_TRANSPORT_ISO_FROM_HS_COUNT (10)
+#define MYNEWT_VAL_BLE_TRANSPORT_ISO_FROM_HS_COUNT (0)
 #endif
 
 #ifndef MYNEWT_VAL_BLE_TRANSPORT_ISO_FROM_LL_COUNT
-#define MYNEWT_VAL_BLE_TRANSPORT_ISO_FROM_LL_COUNT (10)
+#define MYNEWT_VAL_BLE_TRANSPORT_ISO_FROM_LL_COUNT (0)
 #endif
 
 #ifndef MYNEWT_VAL_BLE_TRANSPORT_ISO_SIZE
