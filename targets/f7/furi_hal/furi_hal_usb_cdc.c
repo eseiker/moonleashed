@@ -45,18 +45,13 @@ struct CdcConfigDescriptorDual {
 
 static const struct usb_string_descriptor dev_manuf_desc = USB_STRING_DESC("Flipper Devices Inc.");
 
-/* Interface names, served as string descriptor indices 4 and 5 (TASK-806).
- * Without them every port of the dual mode falls back to the product string and
- * a host serial picker shows the same label twice. The first port carries the
- * CLI and RPC; the second is the auxiliary one the Tailcat and USB-UART bridges
- * use. */
-static const struct usb_string_descriptor dev_cli_iface_desc = USB_STRING_DESC("Flipper CLI");
-static const struct usb_string_descriptor dev_aux_iface_desc = USB_STRING_DESC("Flipper Serial");
-static void* cdc_iface_names[] = {
-    (void*)&dev_cli_iface_desc,
-    (void*)&dev_aux_iface_desc,
-    NULL,
-};
+/* Name of the second CDC port, served as string descriptor index 4 (TASK-806).
+ * The first port stays unnamed and so keeps the device's own product string,
+ * which is what every tool and every set of instructions already calls it. Only
+ * the second port carries a name, so a host that reads interface strings can
+ * tell the two apart. Built in cdc_init from the device name, as the product
+ * string is. */
+static void* cdc_iface_names[] = {NULL, NULL};
 
 /* Device descriptor */
 static const struct usb_device_descriptor cdc_device_desc = {
@@ -101,7 +96,7 @@ static const struct CdcConfigDescriptorSingle cdc_cfg_desc_single = {
                     .bFunctionClass = USB_CLASS_CDC,
                     .bFunctionSubClass = USB_CDC_SUBCLASS_ACM,
                     .bFunctionProtocol = USB_PROTO_NONE,
-                    .iFunction = UsbDevIfaceFirst,
+                    .iFunction = NO_DESCRIPTOR,
                 },
             .comm =
                 {
@@ -113,7 +108,7 @@ static const struct CdcConfigDescriptorSingle cdc_cfg_desc_single = {
                     .bInterfaceClass = USB_CLASS_CDC,
                     .bInterfaceSubClass = USB_CDC_SUBCLASS_ACM,
                     .bInterfaceProtocol = USB_PROTO_NONE,
-                    .iInterface = UsbDevIfaceFirst,
+                    .iInterface = NO_DESCRIPTOR,
                 },
             .cdc_hdr =
                 {
@@ -164,7 +159,7 @@ static const struct CdcConfigDescriptorSingle cdc_cfg_desc_single = {
                     .bInterfaceClass = USB_CLASS_CDC_DATA,
                     .bInterfaceSubClass = USB_SUBCLASS_NONE,
                     .bInterfaceProtocol = USB_PROTO_NONE,
-                    .iInterface = UsbDevIfaceFirst,
+                    .iInterface = NO_DESCRIPTOR,
                 },
             .data_eprx =
                 {
@@ -214,7 +209,7 @@ static const struct CdcConfigDescriptorDual
                             .bFunctionClass = USB_CLASS_CDC,
                             .bFunctionSubClass = USB_CDC_SUBCLASS_ACM,
                             .bFunctionProtocol = USB_PROTO_NONE,
-                            .iFunction = UsbDevIfaceFirst,
+                            .iFunction = NO_DESCRIPTOR,
                         },
                     .comm =
                         {
@@ -226,7 +221,7 @@ static const struct CdcConfigDescriptorDual
                             .bInterfaceClass = USB_CLASS_CDC,
                             .bInterfaceSubClass = USB_CDC_SUBCLASS_ACM,
                             .bInterfaceProtocol = USB_PROTO_NONE,
-                            .iInterface = UsbDevIfaceFirst,
+                            .iInterface = NO_DESCRIPTOR,
                         },
                     .cdc_hdr =
                         {
@@ -277,7 +272,7 @@ static const struct CdcConfigDescriptorDual
                             .bInterfaceClass = USB_CLASS_CDC_DATA,
                             .bInterfaceSubClass = USB_SUBCLASS_NONE,
                             .bInterfaceProtocol = USB_PROTO_NONE,
-                            .iInterface = UsbDevIfaceFirst,
+                            .iInterface = NO_DESCRIPTOR,
                         },
                     .data_eprx =
                         {
@@ -309,7 +304,7 @@ static const struct CdcConfigDescriptorDual
                             .bFunctionClass = USB_CLASS_CDC,
                             .bFunctionSubClass = USB_CDC_SUBCLASS_ACM,
                             .bFunctionProtocol = USB_PROTO_NONE,
-                            .iFunction = UsbDevIfaceFirst + 1,
+                            .iFunction = UsbDevIfaceFirst,
                         },
                     .comm =
                         {
@@ -321,7 +316,7 @@ static const struct CdcConfigDescriptorDual
                             .bInterfaceClass = USB_CLASS_CDC,
                             .bInterfaceSubClass = USB_CDC_SUBCLASS_ACM,
                             .bInterfaceProtocol = USB_PROTO_NONE,
-                            .iInterface = UsbDevIfaceFirst + 1,
+                            .iInterface = UsbDevIfaceFirst,
                         },
                     .cdc_hdr =
                         {
@@ -372,7 +367,7 @@ static const struct CdcConfigDescriptorDual
                             .bInterfaceClass = USB_CLASS_CDC_DATA,
                             .bInterfaceSubClass = USB_SUBCLASS_NONE,
                             .bInterfaceProtocol = USB_PROTO_NONE,
-                            .iInterface = UsbDevIfaceFirst + 1,
+                            .iInterface = UsbDevIfaceFirst,
                         },
                     .data_eprx =
                         {
@@ -470,6 +465,25 @@ static void cdc_init(usbd_device* dev, FuriHalUsbInterface* intf, void* ctx) {
         dev_serial_desc->wString[i + 5] = name[i];
     }
 
+    /* "<device name> (CDC 2)" for the second port, so a host that reads
+     * interface strings shows something other than the device name for it. */
+    static const char cdc2_suffix[] = " (CDC 2)";
+    const uint8_t suffix_len = sizeof(cdc2_suffix) - 1;
+    /* The device name again, not the short one the serial string used, so the
+     * two ports read as a pair in a picker. */
+    char* dev_name = (char*)furi_hal_version_get_device_name_ptr();
+    uint8_t dev_name_len = (dev_name == NULL) ? (0) : (strlen(dev_name));
+    struct usb_string_descriptor* dev_cdc2_desc = malloc((dev_name_len + suffix_len) * 2 + 2);
+    dev_cdc2_desc->bLength = (dev_name_len + suffix_len) * 2 + 2;
+    dev_cdc2_desc->bDescriptorType = USB_DTYPE_STRING;
+    for(uint8_t i = 0; i < dev_name_len; i++) {
+        dev_cdc2_desc->wString[i] = dev_name[i];
+    }
+    for(uint8_t i = 0; i < suffix_len; i++) {
+        dev_cdc2_desc->wString[dev_name_len + i] = cdc2_suffix[i];
+    }
+    cdc_iface_names[0] = dev_cdc2_desc;
+
     cdc_if_cur->str_prod_descr = dev_prod_desc;
     cdc_if_cur->str_serial_descr = dev_serial_desc;
 
@@ -485,6 +499,8 @@ static void cdc_deinit(usbd_device* dev) {
 
     free(cdc_if_cur->str_prod_descr);
     free(cdc_if_cur->str_serial_descr);
+    free(cdc_iface_names[0]);
+    cdc_iface_names[0] = NULL;
 
     cdc_if_cur = NULL;
 }
