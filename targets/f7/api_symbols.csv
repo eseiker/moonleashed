@@ -1,5 +1,5 @@
 entry,status,name,type,params
-Version,+,88.23,,
+Version,+,88.24,,
 Header,+,applications/drivers/subghz/cc1101_ext/cc1101_ext_interconnect.h,,
 Header,+,applications/services/applications.h,,
 Header,+,applications/services/bt/bt_service/bt.h,,
@@ -1714,6 +1714,7 @@ Function,+,furi_hal_light_set,void,"Light, uint8_t"
 Function,+,furi_hal_memory_alloc,void*,size_t
 Function,+,furi_hal_memory_get_free,size_t,
 Function,+,furi_hal_memory_init,void,
+Function,+,furi_hal_memory_region_free,size_t,uint8_t
 Function,+,furi_hal_memory_max_pool_block,size_t,
 Function,+,furi_hal_mpu_disable,void,
 Function,+,furi_hal_mpu_enable,void,

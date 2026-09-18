@@ -100,6 +100,19 @@ SECTIONS {
         _edata = .;        /* define a global symbol at data end */
     } >RAM1 AT> FLASH
 
+    /* NimBLE's HCI transport pools (TASK-785). They are held for the life of
+     * the host, so they live in the SRAM2B the radio core leaves free instead of
+     * this core's RAM. They sit before __sram2b_start__, which is where
+     * furi_hal_memory starts its runtime pool, so the two cannot overlap. */
+    .sram2b_pools (NOLOAD)   :
+    {
+        *(.bss.pool_acl_buf)
+        *(.bss.pool_evt_lo_buf)
+        *(.bss.pool_evt_buf)
+        *(.bss.pool_cmd_buf)
+        . = ALIGN(4);
+    } >RAM2B
+
     /* Uninitialized data section */
     . = ALIGN(4);
     .bss : {

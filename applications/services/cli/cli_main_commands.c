@@ -5,6 +5,7 @@
 #include <core/thread.h>
 #include <furi_hal.h>
 #include <furi_hal_info.h>
+#include <furi_hal_memory.h>
 #include <task_control_block.h>
 #include <time.h>
 #include <notification/notification_messages.h>
@@ -434,6 +435,10 @@ void cli_command_free(PipeSide* pipe, FuriString* args, void* context) {
     printf("Maximum heap block: %zu\r\n", memmgr_heap_get_max_free_block());
 
     printf("Pool free: %zu\r\n", memmgr_pool_get_free());
+    printf(
+        "Pool SRAM2A: %zu, SRAM2B: %zu\r\n",
+        furi_hal_memory_region_free(0),
+        furi_hal_memory_region_free(1));
     printf("Maximum pool block: %zu\r\n", memmgr_pool_get_max_block());
 }
 

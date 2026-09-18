@@ -39,6 +39,14 @@ size_t furi_hal_memory_get_free(void);
  */
 size_t furi_hal_memory_max_pool_block(void);
 
+/** Get free space in one SRAM2 region
+ *
+ * @param      region  0 for SRAM2A, 1 for SRAM2B
+ *
+ * @return     free bytes in that region, 0 if the pool is unavailable
+ */
+size_t furi_hal_memory_region_free(uint8_t region);
+
 #ifdef __cplusplus
 }
 #endif

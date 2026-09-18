@@ -57,7 +57,15 @@ void furi_hal_memory_init(void) {
     } else {
         memory->region[SRAM_A].size = 0;
     }
-    memory->region[SRAM_B].size = sram2b_unprotected_size;
+    /* SRAM2B can carry statics too (the NimBLE transport pools), so the region
+     * starts after them, exactly as SRAM2A starts after the mailbox. Without
+     * this the pool would run past the boundary CPU2 owns. */
+    uint32_t sram2b_busy_size = (uint32_t)&__sram2b_start__ - SRAM2B_BASE;
+    if(sram2b_unprotected_size > sram2b_busy_size) {
+        memory->region[SRAM_B].size = sram2b_unprotected_size - sram2b_busy_size;
+    } else {
+        memory->region[SRAM_B].size = 0;
+    }
 
     FURI_LOG_I(
         TAG, "SRAM2A: 0x%p, %lu", memory->region[SRAM_A].start, memory->region[SRAM_A].size);
@@ -114,6 +122,11 @@ size_t furi_hal_memory_get_free(void) {
         free += furi_hal_memory->region[i].size;
     }
     return free;
+}
+
+size_t furi_hal_memory_region_free(uint8_t region) {
+    if(furi_hal_memory == NULL || region >= SRAM_MAX) return 0;
+    return furi_hal_memory->region[region].size;
 }
 
 size_t furi_hal_memory_max_pool_block(void) {
