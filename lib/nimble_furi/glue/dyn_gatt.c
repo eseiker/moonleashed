@@ -51,6 +51,7 @@ typedef struct {
 typedef struct {
     bool used;
     bool primary;
+    uint8_t owner;
     ble_uuid_any_t uuid;
     DynChr chrs[DYN_GATT_MAX_CHRS_PER_SVC];
     struct ble_gatt_chr_def chr_defs[DYN_GATT_MAX_CHRS_PER_SVC + 1];
@@ -59,7 +60,7 @@ typedef struct {
 
 static DynSvc* s_svcs[DYN_GATT_MAX_SVCS];
 static struct ble_gatt_svc_def s_svc_defs[DYN_GATT_MAX_SVCS + 1];
-static DynGattHooks s_hooks;
+static DynGattHooks s_hooks[DYN_GATT_OWNERS];
 static FuriMutex* s_mutex;
 /* DynUpdate*, applied in order on the host thread */
 static FuriMessageQueue* s_updates;
@@ -102,6 +103,12 @@ static DynChr* dyn_chr_at(int chr_id) {
     return &s_svcs[svc]->chrs[idx];
 }
 
+static const DynGattHooks* dyn_hooks(int chr_id) {
+    int svc = chr_id / DYN_GATT_MAX_CHRS_PER_SVC;
+    if(chr_id < 0 || svc >= DYN_GATT_MAX_SVCS || !s_svcs[svc]) return NULL;
+    return &s_hooks[s_svcs[svc]->owner];
+}
+
 static int dyn_chr_access(
     uint16_t conn_handle,
     uint16_t attr_handle,
@@ -130,7 +137,8 @@ static int dyn_chr_access(
         memcpy(c->value, buf, len);
         c->len = len;
         dyn_unlock();
-        if(s_hooks.on_write) s_hooks.on_write(conn_handle, attr_handle, buf, len);
+        const DynGattHooks* hooks = dyn_hooks(chr_id);
+        if(hooks && hooks->on_write) hooks->on_write(conn_handle, attr_handle, buf, len);
         free(buf);
         return 0;
     }
@@ -184,16 +192,17 @@ void dyn_gatt_init(void) {
     ble_npl_event_init(&s_update_event, dyn_update_event_fn, NULL);
 }
 
-void dyn_gatt_set_hooks(const DynGattHooks* hooks) {
+void dyn_gatt_set_hooks(uint8_t owner, const DynGattHooks* hooks) {
+    if(owner >= DYN_GATT_OWNERS) return;
     if(hooks) {
-        s_hooks = *hooks;
+        s_hooks[owner] = *hooks;
     } else {
-        memset(&s_hooks, 0, sizeof(s_hooks));
+        memset(&s_hooks[owner], 0, sizeof(s_hooks[owner]));
     }
 }
 
-int dyn_gatt_service_add(const DynGattUuid* uuid, bool primary) {
-    if(!uuid || !s_mutex) return -1;
+int dyn_gatt_service_add(const DynGattUuid* uuid, bool primary, uint8_t owner) {
+    if(!uuid || !s_mutex || owner >= DYN_GATT_OWNERS) return -1;
     ble_uuid_any_t nuuid;
     if(!dyn_to_nimble_uuid(uuid, &nuuid)) return -1;
 
@@ -211,6 +220,7 @@ int dyn_gatt_service_add(const DynGattUuid* uuid, bool primary) {
         memset(s, 0, sizeof(DynSvc));
         s->used = true;
         s->primary = primary;
+        s->owner = owner;
         s->uuid = nuuid;
         s_svcs[slot] = s;
         s_dirty = true;
@@ -419,7 +429,9 @@ void dyn_gatt_register_all(void) {
 
 void dyn_gatt_after_start(void) {
     s_live = true;
-    if(s_hooks.on_committed) s_hooks.on_committed();
+    for(size_t i = 0; i < DYN_GATT_OWNERS; i++) {
+        if(s_hooks[i].on_committed) s_hooks[i].on_committed();
+    }
 }
 
 void dyn_gatt_on_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool notify, bool indicate) {
@@ -436,9 +448,10 @@ void dyn_gatt_on_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool noti
         }
     }
     dyn_unlock();
-    if(chr_id < 0 || !s_hooks.on_write) return;
+    const DynGattHooks* hooks = dyn_hooks(chr_id);
+    if(!hooks || !hooks->on_write) return;
     uint8_t cccd[2] = {(notify ? 0x01 : 0) | (indicate ? 0x02 : 0), 0x00};
-    s_hooks.on_write(conn_handle, attr_handle + 1, cccd, sizeof(cccd));
+    hooks->on_write(conn_handle, attr_handle + 1, cccd, sizeof(cccd));
 }
 
 void dyn_gatt_on_notify_tx(uint16_t conn_handle, uint16_t attr_handle, int status, bool indication) {
@@ -456,5 +469,6 @@ void dyn_gatt_on_notify_tx(uint16_t conn_handle, uint16_t attr_handle, int statu
         }
     }
     dyn_unlock();
-    if(chr_id >= 0 && s_hooks.on_indicate_done) s_hooks.on_indicate_done(conn_handle);
+    const DynGattHooks* hooks = dyn_hooks(chr_id);
+    if(hooks && hooks->on_indicate_done) hooks->on_indicate_done(conn_handle);
 }

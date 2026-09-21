@@ -178,7 +178,7 @@ void ble_gatt_host_shim_set(const BleGattHostShim* new_shim) {
     // Profile services register event handlers; gap_init normally sets this up
     if(new_shim) ble_event_dispatcher_init();
     if(!dyn_tables_mutex) dyn_tables_mutex = furi_mutex_alloc(FuriMutexTypeNormal);
-    dyn_gatt_set_hooks(new_shim ? &dyn_hooks : NULL);
+    dyn_gatt_set_hooks(DYN_GATT_OWNER_SHIM, new_shim ? &dyn_hooks : NULL);
     shim = new_shim;
 }
 
@@ -498,7 +498,8 @@ bool ble_gatt_service_add(
 
         DynGattUuid uuid;
         dyn_uuid(&uuid, Service_UUID_Type, Service_UUID);
-        int svc_id = dyn_gatt_service_add(&uuid, Service_Type != SECONDARY_SERVICE);
+        int svc_id =
+            dyn_gatt_service_add(&uuid, Service_Type != SECONDARY_SERVICE, DYN_GATT_OWNER_SHIM);
         if(svc_id < 0) return false;
         dyn_tables_lock();
         for(size_t i = 0; i < COUNT_OF(dyn_svcs); i++) {
