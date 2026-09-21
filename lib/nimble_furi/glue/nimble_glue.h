@@ -41,6 +41,17 @@ bool nimble_glue_hid_input_report(uint8_t report_id, const uint8_t* data, uint16
  * re-advertises, like a stock profile change. */
 void nimble_glue_gatt_rebuild(void);
 
+/* Radio tests on the HCILayer radio: Direct Test Mode, the ST carrier tone,
+ * and the RSSI while an RX test runs. Stop advertising and drop the link
+ * first. Called from the CLI thread: they only send HCI commands, which
+ * NimBLE serializes itself, so they need not run on the host thread. */
+bool nimble_glue_dtm_tx_start(uint8_t channel, uint8_t payload, uint8_t phy);
+bool nimble_glue_dtm_rx_start(uint8_t channel, uint8_t phy);
+bool nimble_glue_dtm_stop(uint16_t* rx_packets, uint32_t* tx_packets);
+bool nimble_glue_tone_start(uint8_t channel, uint8_t pa_level);
+void nimble_glue_tone_stop(void);
+bool nimble_glue_read_rssi(int8_t* dbm);
+
 /* Crypto self-tests against the NIST P-256 and RFC 4493 vectors. */
 bool sm_alg_pka_selftest(void);
 bool sm_cmac_selftest(void);

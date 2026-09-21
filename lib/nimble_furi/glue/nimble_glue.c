@@ -12,6 +12,7 @@
 #include "host/ble_gap.h"
 #include "host/ble_sm.h"
 #include "host/ble_store.h"
+#include "host/ble_dtm.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
@@ -43,6 +44,7 @@ static struct {
     FuriThread* host;
     volatile bool started;
     volatile bool synced;
+    volatile uint32_t sync_count;
     volatile bool advertising;
     volatile bool pairing;
     volatile bool adv_disabled;
@@ -231,6 +233,7 @@ static void on_sync(void) {
         return;
     }
     glue.synced = true;
+    glue.sync_count++;
     hid_gatt_set_visible(glue.hid_advertised, false);
     if(dyn_gatt_dirty() || glue.gatt_retry) {
         ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &gatt_rebuild_event);
@@ -467,4 +470,113 @@ bool nimble_glue_hid_input_report(uint8_t report_id, const uint8_t* data, uint16
 
 void nimble_glue_gatt_rebuild(void) {
     post(&gatt_rebuild_event);
+}
+
+/* Radio tests. The caller stops advertising and drops the link first; those
+ * run later on the host thread, so each test waits for the link layer to go
+ * idle. ACI_HAL_GET_LINK_STATUS reports one state per slot: idle 0x00,
+ * RX test 0x07. */
+#define ACI_HAL_SET_TX_POWER_LEVEL_OCF 0x000F
+#define ACI_HAL_TONE_START_OCF         0x0015
+#define ACI_HAL_TONE_STOP_OCF          0x0016
+#define ACI_HAL_LE_TX_TEST_PACKETS_OCF 0x0014
+#define ACI_HAL_GET_LINK_STATUS_OCF    0x0017
+#define ACI_HAL_READ_RSSI_OCF          0x0022
+#define LL_STATE_IDLE                  0x00
+#define LL_STATE_RX_TEST               0x07
+
+/* Slot 0 in state, the other seven idle. */
+static bool ll_wait(uint8_t state, uint32_t timeout_ms) {
+    uint8_t rsp[24]; /* 8 states, 8 connection handles */
+    for(uint32_t waited = 0;; waited += 10) {
+        if(ble_hs_hci_send_vs_cmd(ACI_HAL_GET_LINK_STATUS_OCF, NULL, 0, rsp, sizeof(rsp)) != 0)
+            return false;
+        bool match = rsp[0] == state;
+        for(uint8_t i = 1; i < 8 && match; i++)
+            match = rsp[i] == LL_STATE_IDLE;
+        if(match) return true;
+        if(waited >= timeout_ms) {
+            if(timeout_ms) FURI_LOG_W(TAG, "Link layer busy, test not started");
+            return false;
+        }
+        furi_delay_ms(10);
+    }
+}
+
+/* CPU2 hard-faulted now and then after a test unless the controller was reset.
+ * NimBLE resyncs and on_sync advertises again if Bluetooth is on. */
+static volatile bool test_reset_pending;
+static volatile uint32_t test_reset_sync_count;
+
+static void test_end_reset(void) {
+    test_reset_sync_count = glue.sync_count;
+    test_reset_pending = true;
+    ble_hs_sched_reset(BLE_HS_ECONTROLLER);
+}
+
+/* A test started right after a stop waits here for that reset's resync. */
+static bool test_wait_resync(void) {
+    for(uint32_t waited = 0; test_reset_pending; waited += 10) {
+        if(glue.synced && glue.sync_count != test_reset_sync_count) {
+            test_reset_pending = false;
+        } else if(waited >= 3000) {
+            FURI_LOG_W(TAG, "No resync after the last test");
+            return false;
+        } else {
+            furi_delay_ms(10);
+        }
+    }
+    return true;
+}
+
+bool nimble_glue_dtm_tx_start(uint8_t channel, uint8_t payload, uint8_t phy) {
+    if(!test_wait_resync() || !ll_wait(LL_STATE_IDLE, 1000)) return false;
+    struct ble_dtm_tx_params p = {
+        .channel = channel,
+        .test_data_len = 37,
+        .payload = payload,
+        .phy = phy,
+    };
+    return ble_dtm_tx_start(&p) == 0;
+}
+
+bool nimble_glue_dtm_rx_start(uint8_t channel, uint8_t phy) {
+    if(!test_wait_resync() || !ll_wait(LL_STATE_IDLE, 1000)) return false;
+    struct ble_dtm_rx_params p = {.channel = channel, .phy = phy};
+    return ble_dtm_rx_start(&p) == 0;
+}
+
+bool nimble_glue_dtm_stop(uint16_t* rx_packets, uint32_t* tx_packets) {
+    /* Test End reports received packets only; ST's command counts sent ones. */
+    uint8_t rsp[4] = {0};
+    ble_hs_hci_send_vs_cmd(ACI_HAL_LE_TX_TEST_PACKETS_OCF, NULL, 0, rsp, sizeof(rsp));
+    *tx_packets = rsp[0] | (rsp[1] << 8) | (rsp[2] << 16) | ((uint32_t)rsp[3] << 24);
+    int rc = ble_dtm_stop(rx_packets);
+    test_end_reset();
+    return rc == 0;
+}
+
+bool nimble_glue_tone_start(uint8_t channel, uint8_t pa_level) {
+    if(!test_wait_resync() || !ll_wait(LL_STATE_IDLE, 1000)) return false;
+    uint8_t power[2] = {0 /* normal mode */, pa_level};
+    uint8_t tone[2] = {channel, 0 /* no offset */};
+    int rc = ble_hs_hci_send_vs_cmd(ACI_HAL_SET_TX_POWER_LEVEL_OCF, power, 2, NULL, 0);
+    if(rc == 0) rc = ble_hs_hci_send_vs_cmd(ACI_HAL_TONE_START_OCF, tone, 2, NULL, 0);
+    return rc == 0;
+}
+
+void nimble_glue_tone_stop(void) {
+    ble_hs_hci_send_vs_cmd(ACI_HAL_TONE_STOP_OCF, NULL, 0, NULL, 0);
+    test_end_reset();
+}
+
+bool nimble_glue_read_rssi(int8_t* dbm) {
+    /* This radio has no ACI_HAL_RX_START; the level exists only during an RX test. */
+    if(!ll_wait(LL_STATE_RX_TEST, 0)) return false;
+    uint8_t value = 0x7F;
+    int rc = ble_hs_hci_send_vs_cmd(ACI_HAL_READ_RSSI_OCF, NULL, 0, &value, 1);
+    /* 0x7F: nothing received */
+    if(rc != 0 || value == 0x7F) return false;
+    *dbm = (int8_t)value;
+    return true;
 }
