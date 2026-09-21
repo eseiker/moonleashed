@@ -3,6 +3,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -61,6 +62,10 @@ bool nimble_glue_beacon_is_wanted(void);
 /* Run cleanup whenever an app stops, so an app that exits without its deinit
  * leaves no callback behind. Idempotent; call it from an app thread. */
 void nimble_glue_on_app_stop(void (*cleanup)(void));
+
+/* Run fn on the host thread with a copy of len bytes of arg, in call order.
+ * False if the host is not running or 16 jobs are already waiting. */
+bool nimble_glue_run_on_host(void (*fn)(void* arg), const void* arg, size_t len);
 
 /* A central session: scan for a peer advertising `name` and connect to it.
  * The companion's link stays up; advertising pauses until the session ends.
