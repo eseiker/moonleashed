@@ -49,10 +49,15 @@ typedef struct {
     void (*on_committed)(void);
 } DynGattHooks;
 
-void dyn_gatt_set_hooks(const DynGattHooks* hooks);
+/* A service's events go to its owner's hooks */
+#define DYN_GATT_OWNER_SHIM   0 /* the stock ble_gatt_* API */
+#define DYN_GATT_OWNER_SERVER 1 /* ble_gatt_server_* */
+#define DYN_GATT_OWNERS       2
+
+void dyn_gatt_set_hooks(uint8_t owner, const DynGattHooks* hooks);
 
 /* Any thread. Return an id >= 0, or -1. */
-int dyn_gatt_service_add(const DynGattUuid* uuid, bool primary);
+int dyn_gatt_service_add(const DynGattUuid* uuid, bool primary, uint8_t owner);
 bool dyn_gatt_service_remove(int svc_id);
 int dyn_gatt_char_add(
     int svc_id,

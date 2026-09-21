@@ -28,6 +28,7 @@ The previous line of development (v1) is kept on the [`v1/main`](../../tree/v1/m
 - **Apps can open L2CAP channels** (`ble_l2cap_coc_*`, Moon-compatible) as client or server, with SDUs up to 2048 bytes.
 - **Apps can advertise their own payload** (`furi_ble_adv_*`), once or continuously, beside the companion's link, and **relay raw L2CAP frames on a fixed CID** (`ble_l2cap_fixed_*`).
 - **Apps can drive pairing** (`ble_security_*`): IO capability, passkey, numeric comparison and Secure Connections OOB. The companion's PIN pairing returns when the app ends.
+- **Apps can serve GATT without a profile** (`ble_gatt_server_*`): define services at runtime, commit, and get writes and subscriptions.
 
 Everything else follows upstream Unleashed. See its README and changelog for features.
 
