@@ -587,12 +587,16 @@ static void bt_nimble_poll_callback(void* context) {
         status = BtStatusAdvertising;
     }
     // A state counts as shown only once its message is queued
-    if(status != bt->status) {
+    bool beacon = furi_hal_bt_extra_beacon_is_active();
+    if(status != bt->status || beacon != bt->beacon_active) {
         BtStatus previous = bt->status;
+        bool previous_beacon = bt->beacon_active;
         bt->status = status;
+        bt->beacon_active = beacon;
         BtMessage message = {.type = BtMessageTypeUpdateStatus};
         if(furi_message_queue_put(bt->message_queue, &message, 0) != FuriStatusOk) {
             bt->status = previous;
+            bt->beacon_active = previous_beacon;
         }
     }
 

@@ -22,6 +22,7 @@ The previous line of development (v1) is kept on the [`v1/main`](../../tree/v1/m
 - **Apps can add their own GATT services** through the stock `ble_gatt_*` API; they go live on NimBLE when the app's profile starts.
 - **LE Secure Connections**, with the elliptic-curve work on the chip's PKA accelerator (`bt pka_test` checks it).
 - **Radio tests work on the HCILayer radio**: the `bt` CLI carrier, packet and RSSI tests (debug mode).
+- **The extra beacon works**, so BLE Spam–style apps transmit again. While a beacon runs, the companion advertisement pauses; connections stay up.
 
 Everything else follows upstream Unleashed. See its README and changelog for features.
 

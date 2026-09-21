@@ -663,6 +663,10 @@ static int32_t gap_app(void* context) {
 }
 
 void gap_emit_ble_beacon_status_event(bool active) {
+    // NimBLE runs the beacon without the stock GAP
+    if(!gap) {
+        return;
+    }
     GapEvent event = {.type = active ? GapEventTypeBeaconStart : GapEventTypeBeaconStop};
     gap->on_event_cb(event, gap->context);
     FURI_LOG_I(TAG, "Beacon status event: %d", active);

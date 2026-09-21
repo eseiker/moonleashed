@@ -41,6 +41,23 @@ bool nimble_glue_hid_input_report(uint8_t report_id, const uint8_t* data, uint16
  * re-advertises, like a stock profile change. */
 void nimble_glue_gatt_rebuild(void);
 
+/* An app's extra beacon: non-connectable, from our public address or the
+ * given random one.
+ * While it runs, the companion advertisement pauses; links stay up. The TX
+ * power level is not applied: the radio has one global setting. Any thread. */
+bool nimble_glue_beacon_start(
+    const uint8_t* data,
+    uint8_t len,
+    uint16_t min_interval_ms,
+    uint16_t max_interval_ms,
+    uint8_t channel_map,
+    bool public_address,
+    const uint8_t address[6]);
+void nimble_glue_beacon_set_data(const uint8_t* data, uint8_t len);
+void nimble_glue_beacon_stop(void);
+/* False once the beacon is stopped, or failed to start on the host thread. */
+bool nimble_glue_beacon_is_wanted(void);
+
 /* Radio tests on the HCILayer radio: Direct Test Mode, the ST carrier tone,
  * and the RSSI while an RX test runs. Stop advertising and drop the link
  * first. Called from the CLI thread: they only send HCI commands, which
