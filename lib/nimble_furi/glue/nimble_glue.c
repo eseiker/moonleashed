@@ -24,6 +24,7 @@
 #include "info_gatt.h"
 #include "hid_gatt.h"
 #include "dyn_gatt.h"
+#include "gatt_client_glue.h"
 #include "bond_store.h"
 #include "msys_pool.h"
 
@@ -271,6 +272,12 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         maybe_advertise();
         break;
 
+    // An app may run the GATT client on the companion's link too
+    case BLE_GAP_EVENT_NOTIFY_RX:
+        gatt_client_on_notify(
+            event->notify_rx.conn_handle, event->notify_rx.attr_handle, event->notify_rx.om);
+        break;
+
     case BLE_GAP_EVENT_NOTIFY_TX:
         serial_gatt_on_notify_tx(event->notify_tx.attr_handle, event->notify_tx.status);
         dyn_gatt_on_notify_tx(
@@ -399,6 +406,11 @@ static int central_gap_event(struct ble_gap_event* event, void* arg) {
             event->notify_tx.attr_handle,
             event->notify_tx.status,
             event->notify_tx.indication);
+        break;
+
+    case BLE_GAP_EVENT_NOTIFY_RX:
+        gatt_client_on_notify(
+            event->notify_rx.conn_handle, event->notify_rx.attr_handle, event->notify_rx.om);
         break;
 
     case BLE_GAP_EVENT_REPEAT_PAIRING: {
@@ -606,6 +618,41 @@ static void gatt_rebuild_event_fn(struct ble_npl_event* ev) {
 
 static void post(struct ble_npl_event* ev) {
     if(glue.started) ble_npl_eventq_put(nimble_port_get_dflt_eventq(), ev);
+}
+
+typedef struct {
+    struct ble_npl_event event;
+    void (*fn)(void* arg);
+    uint32_t arg[]; /* word-aligned copy of the caller's argument */
+} HostJob;
+
+/* The host eventq holds 64 events and crashes when full, so app jobs get a
+ * share of it. */
+#define HOST_JOBS_MAX 16
+static volatile uint32_t host_jobs;
+
+static void host_job_fn(struct ble_npl_event* ev) {
+    HostJob* job = ble_npl_event_get_arg(ev);
+    job->fn(job->arg);
+    free(job);
+    FURI_CRITICAL_ENTER();
+    host_jobs--;
+    FURI_CRITICAL_EXIT();
+}
+
+bool nimble_glue_run_on_host(void (*fn)(void* arg), const void* arg, size_t len) {
+    if(!glue.started) return false;
+    FURI_CRITICAL_ENTER();
+    bool room = host_jobs < HOST_JOBS_MAX;
+    if(room) host_jobs++;
+    FURI_CRITICAL_EXIT();
+    if(!room) return false;
+    HostJob* job = malloc(sizeof(HostJob) + len);
+    job->fn = fn;
+    if(len) memcpy(job->arg, arg, len);
+    ble_npl_event_init(&job->event, host_job_fn, job);
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &job->event);
+    return true;
 }
 
 static void beacon_event_fn(struct ble_npl_event* ev) {
