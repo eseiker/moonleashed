@@ -7,9 +7,9 @@
  * delivered off the NimBLE host thread through a FuriMessageQueue the FAP drains
  * from its own loop (furi_ble_session_get_event), so an unloaded or blocked FAP
  * never stalls or corrupts the resident host. Freeing the session tears down its
- * role (for the central role: drop the link and restore the companion).
+ * role (for the central role: drop the link and advertise again).
  *
- * This first cut covers the modal central role. The GATT-client and L2CAP-CoC
+ * This first cut covers the central role. The GATT-client and L2CAP-CoC
  * data APIs (ble_gatt_client_* / ble_l2cap_coc_*) still deliver their own events
  * on the host thread; routing them through this queue is the remaining broker
  * work.
@@ -25,9 +25,10 @@ extern "C" {
 typedef struct FuriBleSession FuriBleSession;
 
 typedef enum {
-    /* Modal central: suspend the companion, scan for a named peer, connect as
-     * central. The companion is restored on free. */
-    FuriBleRoleCentralModal,
+    /* Central: scan for a named peer and connect as central. The companion's
+     * link stays up; advertising pauses until the session is freed (TASK-818).
+     * One central session runs at a time. */
+    FuriBleRoleCentral,
 } FuriBleRole;
 
 typedef struct {
@@ -60,7 +61,7 @@ bool furi_ble_session_get_event(FuriBleSession* session, FuriBleEvent* event, ui
  * with ble_gatt_client_* / ble_l2cap_coc_*. 0xFFFF when not connected. */
 uint16_t furi_ble_session_conn_handle(FuriBleSession* session);
 
-/* Tear the session down and restore the companion. */
+/* Tear the session down and advertise again. */
 void furi_ble_session_free(FuriBleSession* session);
 
 #ifdef __cplusplus

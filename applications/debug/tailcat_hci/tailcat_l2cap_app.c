@@ -43,7 +43,7 @@ typedef struct {
     volatile bool connected;
     volatile uint32_t rx_sdus; /* SDUs BLE -> USB */
     volatile uint32_t tx_sdus; /* SDUs USB -> BLE */
-    /* L2F_CONNECT: modal central session (companion suspended while it runs). */
+    /* L2F_CONNECT: central session (the companion stays connected, TASK-818). */
     FuriBleSession* central;
     uint16_t central_psm;
     volatile bool central_coc_opened; /* a CoC opened on the central link */
@@ -627,9 +627,9 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
         furi_ble_adv_clear();
         break;
     case L2F_CONNECT: {
-        /* [psm:2][name...]: suspend the companion, scan for `name`, connect as
-         * central, then open a CoC client on psm once the link is up (the
-         * session's Connected event is handled in l2_poll_central). */
+        /* [psm:2][name...]: scan for `name`, connect as central, then open a
+         * CoC client on psm once the link is up (the session's Connected event
+         * is handled in l2_poll_central). The companion stays connected. */
         if(f->len < 3) break;
         if(app->central) {
             uint8_t code[2] = {0x02, 0x00}; /* a central session is already active */
@@ -643,7 +643,7 @@ static void l2_handle_frame(L2App* app, const L2Frame* f) {
         name[nlen] = '\0';
         app->central_psm = (uint16_t)f->data[0] | ((uint16_t)f->data[1] << 8);
         app->central_coc_opened = false;
-        FuriBleSessionConfig cfg = {.role = FuriBleRoleCentralModal, .central_name = name};
+        FuriBleSessionConfig cfg = {.role = FuriBleRoleCentral, .central_name = name};
         app->central = furi_ble_session_alloc(&cfg);
         if(!app->central) {
             uint8_t code[2] = {0x02, 0x00}; /* refused: host not ready or busy */

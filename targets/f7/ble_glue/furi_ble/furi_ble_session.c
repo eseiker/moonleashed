@@ -47,11 +47,11 @@ static void session_central_cb(NimbleCentralEventKind kind, uint16_t conn, int s
 
 FuriBleSession* furi_ble_session_alloc(const FuriBleSessionConfig* config) {
     if(!config) return NULL;
-    if(config->role != FuriBleRoleCentralModal) {
+    if(config->role != FuriBleRoleCentral) {
         FURI_LOG_E(TAG, "unsupported role %d", config->role);
         return NULL;
     }
-    /* Arbitration: only one modal central session at a time. */
+    /* Arbitration: only one central session at a time. */
     if(nimble_glue_central_is_active()) {
         FURI_LOG_W(TAG, "a central session is already active");
         return NULL;
@@ -82,8 +82,8 @@ uint16_t furi_ble_session_conn_handle(FuriBleSession* session) {
 
 void furi_ble_session_free(FuriBleSession* session) {
     if(!session) return;
-    if(session->role == FuriBleRoleCentralModal) {
-        nimble_glue_central_stop(); /* drop the link and restore the companion */
+    if(session->role == FuriBleRoleCentral) {
+        nimble_glue_central_stop(); /* drop the central link, advertise again */
     }
     furi_message_queue_free(session->queue);
     free(session);

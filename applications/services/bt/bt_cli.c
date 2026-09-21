@@ -181,10 +181,9 @@ static void bt_cli_command_packet_rx(PipeSide* pipe, FuriString* args, void* con
     } while(false);
 }
 
-/* Central capability probe for the resident NimBLE host (TASK-615, Milestone 2).
- * Suspends the companion and scans as central, so we can see on hardware whether
- * the ST HCILayer controller can act as a central at all — the gate for the
- * Flipper-as-central modal time-share case. */
+/* Central scan probe for the resident NimBLE host (TASK-615). Scans as central
+ * while the companion stays connected (TASK-818); advertising pauses until
+ * CTRL+C. */
 static void bt_cli_command_nimble_scan(PipeSide* pipe, FuriString* args, void* context) {
     UNUSED(args);
     UNUSED(context);
@@ -197,9 +196,7 @@ static void bt_cli_command_nimble_scan(PipeSide* pipe, FuriString* args, void* c
         printf("Probe start failed (already probing, or host not synced).\r\n");
         return;
     }
-    printf("Central scan probe: companion suspended, scanning as central.\r\n");
-    printf("If reports appear, the controller can scan; if not, it is peripheral-only.\r\n");
-    printf("Press CTRL+C to stop and restore the companion.\r\n");
+    printf("Scanning as central. Press CTRL+C to stop.\r\n");
 
     uint32_t last = 0;
     while(!cli_is_pipe_broken_or_is_etx_next_char(pipe)) {
@@ -223,12 +220,12 @@ static void bt_cli_command_nimble_scan(PipeSide* pipe, FuriString* args, void* c
     }
 
     nimble_glue_central_probe_stop();
-    printf("Scan stopped. total reports=%lu. Companion restored.\r\n", nimble_glue_scan_count());
+    printf("Scan stopped. total reports=%lu.\r\n", nimble_glue_scan_count());
 }
 
-/* Modal DCT central session (TASK-615, Milestone 2). Suspends the companion,
- * scans for a peer advertising "FlipperDCT", connects as central, and opens an
- * L2CAP CoC as the client on the given PSM. */
+/* DCT central session (TASK-615). Scans for a peer advertising "FlipperDCT",
+ * connects as central, and opens an L2CAP CoC as the client on the given PSM,
+ * while the companion stays connected (TASK-818). */
 static void bt_cli_command_nimble_coc(PipeSide* pipe, FuriString* args, void* context) {
     UNUSED(context);
 
@@ -246,25 +243,27 @@ static void bt_cli_command_nimble_coc(PipeSide* pipe, FuriString* args, void* co
         printf("DCT start failed (already active, or host not synced).\r\n");
         return;
     }
-    printf("DCT session: companion suspended, scanning for 'FlipperDCT', PSM %d.\r\n", psm);
-    printf("Press CTRL+C to stop and restore the companion.\r\n");
+    printf("DCT: scanning for 'FlipperDCT', PSM %d. CTRL+C stops.\r\n", psm);
 
     uint32_t last = 0;
     while(!cli_is_pipe_broken_or_is_etx_next_char(pipe)) {
         furi_delay_ms(250);
         uint32_t rx = nimble_glue_dct_rx_bytes();
         if(rx != last) {
-            printf("CoC rx=%lu bytes\r\n", rx);
+            printf("CoC rx=%lu bytes, companion %s\r\n", rx, nimble_glue_is_connected() ? "up" : "down");
             last = rx;
         }
         if(!nimble_glue_dct_is_active()) {
-            printf("DCT session ended (peer dropped or connect failed).\r\n");
+            printf("DCT session ended, status 0x%X\r\n", nimble_glue_dct_end_status());
             break;
         }
     }
 
     nimble_glue_dct_stop();
-    printf("DCT stopped. rx=%lu bytes. Companion restored.\r\n", nimble_glue_dct_rx_bytes());
+    printf(
+        "DCT stopped. rx=%lu bytes, companion %s\r\n",
+        nimble_glue_dct_rx_bytes(),
+        nimble_glue_is_connected() ? "up" : "down");
 }
 
 static void bt_cli_command_pka_test(PipeSide* pipe, FuriString* args, void* context) {
@@ -281,7 +280,7 @@ static void bt_cli_print_usage(void) {
     printf("Cmd list:\r\n");
     printf("\thci_info\t - HCI info\r\n");
     printf("\tpka_test\t - crypto self-tests: PKA P-256 and AES-CMAC\r\n");
-    printf("\tnimble_scan\t - NimBLE central scan probe (suspends companion)\r\n");
+    printf("\tnimble_scan\t - NimBLE central scan probe\r\n");
     printf("\tnimble_coc <psm>\t - NimBLE modal DCT: connect to 'FlipperDCT' + CoC\r\n");
     if(furi_hal_rtc_is_flag_set(FuriHalRtcFlagDebug) && furi_hal_bt_is_testing_supported()) {
         printf("\ttx_carrier <channel:0-39> <power:0-6>\t - start tx carrier test\r\n");

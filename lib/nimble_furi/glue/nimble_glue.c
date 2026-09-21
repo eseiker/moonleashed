@@ -83,7 +83,7 @@ static struct {
     volatile bool gatt_rebuild_pending;
     volatile bool gatt_rebuilding;
     volatile bool gatt_rebuild_queued;
-    volatile bool central_probe; /* Milestone 2 gate: scanning as central after suspend */
+    volatile bool central_probe; /* a central scan or session holds advertising off */
     /* The user's Bluetooth setting (TASK-702). While set, the host does not
      * advertise at all, which is what turning Bluetooth off has to mean. */
     volatile bool adv_disabled;
@@ -196,7 +196,7 @@ static void conn_handle_track(uint16_t handle, bool up) {
 static void maybe_advertise(void) {
     if(glue.adv_disabled) return; /* Bluetooth is off in settings */
     if(glue.adv_halted) return; /* advertise-once: waiting for an explicit restart */
-    if(glue.central_probe) return; /* companion is suspended for a central scan */
+    if(glue.central_probe) return; /* a central session holds advertising off */
     if(glue.gatt_rebuilding) return; /* table rebuild needs no GAP procedure */
     if(glue.advertising) return;
     if(glue.conn_count >= MYNEWT_VAL(BLE_MAX_CONNECTIONS)) return;
@@ -278,7 +278,13 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
                 int rc = ble_gap_connect(
                     glue.addr_type, &peer, 5000, NULL, central_gap_event, NULL);
                 FURI_LOG_I(TAG, "Central peer '%s' found, connect rc=%d", central.name, rc);
-                if(rc != 0) central_finish();
+                if(rc != 0) {
+                    /* Report it: a session consumer otherwise waits forever. */
+                    NimbleCentralCb cb = central.cb;
+                    void* ctx = central.ctx;
+                    central_finish();
+                    if(cb) cb(NimbleCentralFailed, 0, rc, ctx);
+                }
             }
         }
         break;
@@ -345,15 +351,10 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             if(nimble_mode_has_hid(glue.mode)) hid_gatt_set_conn(0, false);
             serial_store_save(); /* persist any CCCDs written during the connection */
         }
-        /* If a central scan probe is waiting for the companion to drop, start the
-         * scan now that the last peripheral link is gone (KNOW-618: the ST
-         * controller cannot scan while a peripheral link is up). */
         if(glue.gatt_rebuilding) {
             /* Rebuild once the last link is gone. Re-post instead of rebuilding
              * here: NimBLE may still count the dying link inside this callback. */
             if(glue.conn_count == 0) gatt_rebuild_post();
-        } else if(glue.central_probe && glue.conn_count == 0) {
-            start_scan();
         } else {
             maybe_advertise();
         }
@@ -556,8 +557,8 @@ static void start_advertise(void) {
     FURI_LOG_I(TAG, "Advertising started");
 }
 
-/* Start an active scan as observer/central. Only legal on HCILayer once no
- * peripheral link is up (KNOW-618). Results arrive as BLE_GAP_EVENT_DISC. */
+/* Start an active scan as observer/central. The radio scans with peripheral
+ * links up (KNOW-817). Results arrive as BLE_GAP_EVENT_DISC. */
 static void start_scan(void) {
     struct ble_gap_disc_params dp;
     memset(&dp, 0, sizeof(dp));
@@ -861,24 +862,25 @@ void nimble_glue_adv_clear(void) {
     adv_raw_apply(); /* back to the companion advertisement */
 }
 
-bool nimble_glue_central_probe_start(void) {
-    if(!glue.synced) return false;
-    if(glue.central_probe) return false; /* already probing */
+/* Pause advertising for a central scan or session; the companion's peripheral
+ * link is left alone (TASK-818). The radio scans and connects as central with
+ * peripheral links up (KNOW-817); advertising next to a central link was never
+ * measured, so it pauses. glue.central_probe keeps maybe_advertise from
+ * resuming until the session ends. */
+static void central_suspend_advertising(void) {
     glue.central_probe = true;
     glue.scan_count = 0;
-    /* Suspend the companion: stop advertising and drop the bound peripheral link.
-     * The scan begins from the DISCONNECT handler once conn_count reaches 0, or
-     * immediately when nothing is connected. */
     if(glue.advertising) {
         ble_gap_adv_stop();
         glue.advertising = false;
     }
-    if(glue.conn_count > 0 && glue.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        ble_gap_terminate(glue.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-    }
-    if(glue.conn_count == 0) {
-        start_scan();
-    }
+}
+
+bool nimble_glue_central_probe_start(void) {
+    if(!glue.synced) return false;
+    if(glue.central_probe) return false; /* already probing */
+    central_suspend_advertising();
+    start_scan();
     return true;
 }
 
@@ -892,17 +894,17 @@ void nimble_glue_central_probe_stop(void) {
     maybe_advertise(); /* restore the companion */
 }
 
-/* End the modal central session and restore the companion. */
+/* End the central session and advertise again. */
 static void central_finish(void) {
     central.active = false;
     central.state = CENTRAL_IDLE;
     central.conn_handle = BLE_HS_CONN_HANDLE_NONE;
     central.cb = NULL;
     central.ctx = NULL;
-    glue.central_probe = false; /* let the companion advertise again */
+    glue.central_probe = false;
     glue.scanning = false;
     maybe_advertise();
-    FURI_LOG_I(TAG, "Central session ended, companion restored");
+    FURI_LOG_I(TAG, "Central session ended");
     /* A GATT rebuild requested during the central session was deferred. */
     if(glue.gatt_rebuild_pending) gatt_rebuild_post();
 }
@@ -1079,20 +1081,9 @@ bool nimble_glue_central_start(const char* name, NimbleCentralCb cb, void* ctx) 
     central.cb = cb;
     central.ctx = ctx;
     strncpy(central.name, name ? name : "", sizeof(central.name) - 1);
-    /* Suspend the companion; the scan starts from the DISCONNECT handler once the
-     * last peripheral link is gone (or immediately if nothing is connected). */
-    glue.central_probe = true;
-    glue.scan_count = 0;
-    if(glue.advertising) {
-        ble_gap_adv_stop();
-        glue.advertising = false;
-    }
-    if(glue.conn_count > 0 && glue.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        ble_gap_terminate(glue.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-    }
-    if(glue.conn_count == 0) {
-        start_scan();
-    }
+    /* The companion's link stays up for the whole session. */
+    central_suspend_advertising();
+    start_scan();
     FURI_LOG_I(TAG, "Central session started, scanning for '%s'", central.name);
     return true;
 }
@@ -1141,10 +1132,11 @@ uint16_t nimble_glue_central_conn_handle(void) {
 /* --- DCT helper: a central session that opens a CoC client on connect -------- */
 
 static uint16_t dct_psm;
+static volatile int dct_end_status;
 
 static void dct_central_cb(NimbleCentralEventKind kind, uint16_t conn, int status, void* ctx) {
-    UNUSED(status);
     UNUSED(ctx);
+    if(kind != NimbleCentralConnected) dct_end_status = status;
     if(kind == NimbleCentralConnected) {
         FURI_LOG_I(TAG, "DCT: opening CoC PSM 0x%04X on handle %u", dct_psm, conn);
         int rc = coc_client_connect(conn, dct_psm);
@@ -1157,6 +1149,7 @@ static void dct_central_cb(NimbleCentralEventKind kind, uint16_t conn, int statu
 
 bool nimble_glue_dct_connect(uint16_t psm) {
     dct_psm = psm;
+    dct_end_status = 0;
     return nimble_glue_central_start(DCT_PEER_NAME, dct_central_cb, NULL);
 }
 
@@ -1170,6 +1163,10 @@ bool nimble_glue_dct_is_active(void) {
 
 uint32_t nimble_glue_dct_rx_bytes(void) {
     return coc_rx_bytes();
+}
+
+int nimble_glue_dct_end_status(void) {
+    return dct_end_status;
 }
 
 bool nimble_glue_is_connected(void) {

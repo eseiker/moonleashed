@@ -110,23 +110,22 @@ void nimble_glue_adv_clear(void);
  * session runs. Returns false if the host is not started. */
 bool nimble_glue_gatt_rebuild_request(void);
 
-/* Central capability probe (TASK-615, Milestone 2 gate). Suspends the companion
- * (stops advertising and drops the bound peripheral link), then starts an active
- * scan as observer/central once the last peripheral link is gone. This is the
- * cheap on-hardware test of whether the ST HCILayer controller can act as a
- * central at all — the gate for the Flipper-as-central modal time-share case.
- * Scan reports arrive as log lines; read nimble_glue_scan_count(). Returns false
- * if the host is not synced or a probe is already running. Call
- * nimble_glue_central_probe_stop() to cancel the scan and restore the companion. */
+/* Central scan probe (TASK-615). Pauses advertising and starts an active scan as
+ * observer/central. Peripheral links, including the companion's, stay up: the
+ * HCILayer radio scans alongside them (KNOW-817, TASK-818). Scan reports arrive
+ * as log lines; read nimble_glue_scan_count(). Returns false if the host is not
+ * synced or a probe is already running. nimble_glue_central_probe_stop()
+ * cancels the scan and resumes advertising. */
 bool nimble_glue_central_probe_start(void);
 void nimble_glue_central_probe_stop(void);
 
-/* General modal central session (TASK-615 M2 / TASK-633). Suspend the companion,
- * scan for a peer advertising `name`, connect as central, and report lifecycle
- * through cb (called on the host thread). The caller then drives the link with
- * ble_gatt_client_* / ble_l2cap_coc_* on the reported conn_handle. Only one
- * central session runs at a time; nimble_glue_central_stop restores the
- * companion. The DCT helper below is a thin wrapper over this. */
+/* General central session (TASK-615 M2 / TASK-633). Scan for a peer advertising
+ * `name`, connect as central, and report lifecycle through cb (called on the
+ * host thread). The caller then drives the link with ble_gatt_client_* /
+ * ble_l2cap_coc_* on the reported conn_handle. The companion's peripheral link
+ * stays up throughout (TASK-818); advertising pauses until the session ends.
+ * Only one central session runs at a time; nimble_glue_central_stop ends it.
+ * The DCT helper below is a thin wrapper over this. */
 typedef enum {
     NimbleCentralConnected, /* conn_handle valid */
     NimbleCentralDisconnected, /* status = disconnect reason */
@@ -139,17 +138,20 @@ void nimble_glue_central_stop(void);
 bool nimble_glue_central_is_active(void);
 uint16_t nimble_glue_central_conn_handle(void);
 
-/* Modal DCT central session (TASK-615, Milestone 2). Suspends the companion,
- * scans for a peer advertising the name "FlipperDCT", connects to it as central,
- * and opens an L2CAP CoC as the client on the given PSM. On CoC connect the
- * Flipper sends an opening payload; received bytes are counted
- * (nimble_glue_dct_rx_bytes). When the link drops (or nimble_glue_dct_stop is
- * called) the companion is restored. Returns false if not synced or a session is
- * already active. This is the Flipper-as-central time-share path (KNOW-626). */
+/* DCT central session (TASK-615, Milestone 2). Scans for a peer advertising the
+ * name "FlipperDCT", connects to it as central, and opens an L2CAP CoC as the
+ * client on the given PSM, while the companion stays connected (TASK-818). On
+ * CoC connect the Flipper sends an opening payload; received bytes are counted
+ * (nimble_glue_dct_rx_bytes). The session ends when the link drops or
+ * nimble_glue_dct_stop is called. Returns false if not synced or a session is
+ * already active. */
 bool nimble_glue_dct_connect(uint16_t psm);
 void nimble_glue_dct_stop(void);
 bool nimble_glue_dct_is_active(void);
 uint32_t nimble_glue_dct_rx_bytes(void);
+/* Why the last DCT session ended: the connect failure code or the disconnect
+ * reason (NimBLE error space: 0x2xx is an HCI status). 0 while it runs. */
+int nimble_glue_dct_end_status(void);
 
 /* True while legacy pairing is in progress (passkey shown, awaiting the phone). */
 bool nimble_glue_is_pairing(void);
