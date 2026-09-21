@@ -26,6 +26,7 @@
 #include "hid_gatt.h"
 #include "dyn_gatt.h"
 #include "gatt_client_glue.h"
+#include "security_glue.h"
 #include "bond_store.h"
 #include "msys_pool.h"
 
@@ -185,6 +186,33 @@ static struct {
 } raw_adv;
 
 static void maybe_advertise(void);
+static void on_passkey_action(const struct ble_gap_event* event);
+
+/* Drop the stale bond but keep the link: ble_gap_unpair would terminate the
+ * connection the retry continues on. */
+static int on_repeat_pairing(const struct ble_gap_event* event) {
+    security_glue_on_gap_event(event);
+    struct ble_gap_conn_desc desc;
+    if(ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
+        ble_store_util_delete_peer(&desc.peer_id_addr);
+        bond_store_save();
+    }
+    return BLE_GAP_REPEAT_PAIRING_RETRY;
+}
+
+// App links: the companion's gap_event saves its own bonds
+static void on_app_link_security(const struct ble_gap_event* event) {
+    // With no app driving pairing, the PIN shows as for the companion
+    if(!security_glue_on_gap_event(event) && event->type == BLE_GAP_EVENT_PASSKEY_ACTION) {
+        on_passkey_action(event);
+    }
+    if(event->type == BLE_GAP_EVENT_ENC_CHANGE) {
+        // Ends a PIN screen the fallback opened; the companion's path clears its own
+        glue.pairing = false;
+        if(event->enc_change.status == 0) bond_store_save();
+    }
+    if(event->type == BLE_GAP_EVENT_DISCONNECT) glue.pairing = false;
+}
 
 static int raw_adv_gap_event(struct ble_gap_event* event, void* arg) {
     UNUSED(arg);
@@ -206,6 +234,7 @@ static int raw_adv_gap_event(struct ble_gap_event* event, void* arg) {
         maybe_advertise();
         break;
     case BLE_GAP_EVENT_DISCONNECT:
+        on_app_link_security(event);
         if(glue.gatt_rebuilding) {
             ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &gatt_rebuild_event);
         } else {
@@ -230,13 +259,12 @@ static int raw_adv_gap_event(struct ble_gap_event* event, void* arg) {
         gatt_client_on_notify(
             event->notify_rx.conn_handle, event->notify_rx.attr_handle, event->notify_rx.om);
         break;
-    case BLE_GAP_EVENT_REPEAT_PAIRING: {
-        struct ble_gap_conn_desc desc;
-        if(ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
-            ble_store_util_delete_peer(&desc.peer_id_addr);
-        }
-        return BLE_GAP_REPEAT_PAIRING_RETRY;
-    }
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        on_app_link_security(event);
+        break;
+    case BLE_GAP_EVENT_REPEAT_PAIRING:
+        return on_repeat_pairing(event);
     default:
         break;
     }
@@ -401,25 +429,19 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         break;
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
-        on_passkey_action(event);
+        if(!security_glue_on_gap_event(event)) on_passkey_action(event);
         break;
 
     case BLE_GAP_EVENT_ENC_CHANGE: {
+        security_glue_on_gap_event(event);
         glue.pairing = false;
         FURI_LOG_I(TAG, "Encryption status %d", event->enc_change.status);
         if(event->enc_change.status == 0) bond_store_save();
         break;
     }
 
-    case BLE_GAP_EVENT_REPEAT_PAIRING: {
-        /* Drop the stale bond but keep the link: ble_gap_unpair would
-         * terminate the connection the retry continues on. */
-        struct ble_gap_conn_desc desc;
-        if(ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
-            ble_store_util_delete_peer(&desc.peer_id_addr);
-        }
-        return BLE_GAP_REPEAT_PAIRING_RETRY;
-    }
+    case BLE_GAP_EVENT_REPEAT_PAIRING:
+        return on_repeat_pairing(event);
 
     default:
         break;
@@ -489,6 +511,7 @@ static int central_gap_event(struct ble_gap_event* event, void* arg) {
         break;
 
     case BLE_GAP_EVENT_DISCONNECT:
+        on_app_link_security(event);
         central_end(NimbleCentralDisconnected, central.conn_handle, event->disconnect.reason);
         break;
 
@@ -514,13 +537,13 @@ static int central_gap_event(struct ble_gap_event* event, void* arg) {
             event->notify_rx.conn_handle, event->notify_rx.attr_handle, event->notify_rx.om);
         break;
 
-    case BLE_GAP_EVENT_REPEAT_PAIRING: {
-        struct ble_gap_conn_desc desc;
-        if(ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
-            ble_store_util_delete_peer(&desc.peer_id_addr);
-        }
-        return BLE_GAP_REPEAT_PAIRING_RETRY;
-    }
+    case BLE_GAP_EVENT_PASSKEY_ACTION:
+    case BLE_GAP_EVENT_ENC_CHANGE:
+        on_app_link_security(event);
+        break;
+
+    case BLE_GAP_EVENT_REPEAT_PAIRING:
+        return on_repeat_pairing(event);
 
     default:
         break;
