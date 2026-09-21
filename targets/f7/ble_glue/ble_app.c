@@ -77,6 +77,13 @@ static const SHCI_C2_Ble_Init_Cmd_Packet_t ble_init_cmd_packet = {
                              SHCI_C2_BLE_INIT_OPTIONS_APPEARANCE_READONLY,
     }};
 
+bool ble_app_start_ll_only(void) {
+    SHCI_C2_Ble_Init_Cmd_Packet_t packet = ble_init_cmd_packet;
+    packet.Param.Options = SHCI_C2_BLE_INIT_OPTIONS_LL_ONLY;
+    return SHCI_C2_BLE_Init(&packet) == SHCI_Success &&
+           SHCI_C2_SetFlashActivityControl(FLASH_ACTIVITY_CONTROL_SEM7) == SHCI_Success;
+}
+
 bool ble_app_init(void) {
     SHCI_CmdStatus_t status;
     ble_app = malloc(sizeof(BleApp));

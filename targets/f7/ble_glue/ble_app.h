@@ -12,6 +12,7 @@ extern "C" {
 #endif
 
 bool ble_app_init(void);
+bool ble_app_start_ll_only(void);
 
 void ble_app_get_key_storage_buff(uint8_t** addr, uint16_t* size);
 
