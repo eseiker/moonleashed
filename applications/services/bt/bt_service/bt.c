@@ -11,6 +11,7 @@
 #include <profiles/serial_profile.h>
 #include <nimble_glue.h>
 #include <gatt_host_shim.h>
+#include <ble_dispatch.h>
 
 #define TAG "BtSrv"
 
@@ -437,6 +438,7 @@ static void bt_nimble_change_profile(Bt* bt, BtMessage* message) {
         bt->nimble_profile_started = instance != NULL;
     }
     nimble_glue_set_hid_advertised(ble_gatt_host_shim_has_hid());
+    ble_gatt_host_shim_commit();
     nimble_glue_set_advertising_enabled(bt->bt_settings.enabled);
 
     bt->current_profile = instance;
@@ -637,6 +639,7 @@ static bool bt_nimble_start(Bt* bt) {
         furi_hal_bt_hci_release();
         return false;
     }
+    ble_dispatch_init();
     ble_gatt_host_shim_set(&bt_nimble_gatt_shim);
     bt->nimble_active = true;
     FuriTimer* timer = furi_timer_alloc(bt_nimble_poll_callback, FuriTimerTypePeriodic, bt);

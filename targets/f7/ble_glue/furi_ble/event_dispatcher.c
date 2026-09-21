@@ -2,6 +2,7 @@
 #include <core/check.h>
 #include <furi.h>
 #include <ble/ble.h>
+#include <ble_dispatch.h>
 
 #include <m-list.h>
 
@@ -21,6 +22,8 @@ BleEventFlowStatus ble_event_dispatcher_process_event(void* payload) {
     GapSvcEventHandlerList_it_t it;
     BleEventAckStatus ack_status = BleEventNotAck;
 
+    // Runtime GATT events arrive on the dispatch thread while an app may unregister
+    ble_dispatch_lock();
     for(GapSvcEventHandlerList_it(it, handlers); !GapSvcEventHandlerList_end_p(it);
         GapSvcEventHandlerList_next(it)) {
         const GapSvcEventHandler* item = GapSvcEventHandlerList_cref(it);
@@ -32,6 +35,7 @@ BleEventFlowStatus ble_event_dispatcher_process_event(void* payload) {
             break;
         }
     }
+    ble_dispatch_unlock();
 
     /* Handlers for client-mode events are also to be implemented here. But not today. */
 
@@ -69,9 +73,11 @@ GapSvcEventHandler*
     furi_check(context);
     furi_check(initialized);
 
+    ble_dispatch_lock();
     GapSvcEventHandler* item = GapSvcEventHandlerList_push_raw(handlers);
     item->context = context;
     item->callback = handler;
+    ble_dispatch_unlock();
 
     return item;
 }
@@ -82,6 +88,7 @@ void ble_event_dispatcher_unregister_svc_handler(GapSvcEventHandler* handler) {
     bool found = false;
     GapSvcEventHandlerList_it_t it;
 
+    ble_dispatch_lock();
     for(GapSvcEventHandlerList_it(it, handlers); !GapSvcEventHandlerList_end_p(it);
         GapSvcEventHandlerList_next(it)) {
         const GapSvcEventHandler* item = GapSvcEventHandlerList_cref(it);
@@ -92,6 +99,7 @@ void ble_event_dispatcher_unregister_svc_handler(GapSvcEventHandler* handler) {
             break;
         }
     }
+    ble_dispatch_unlock();
 
     furi_check(found);
 }

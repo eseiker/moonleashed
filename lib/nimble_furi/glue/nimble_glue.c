@@ -19,6 +19,7 @@
 #include "serial_gatt.h"
 #include "info_gatt.h"
 #include "hid_gatt.h"
+#include "dyn_gatt.h"
 #include "bond_store.h"
 #include "msys_pool.h"
 
@@ -33,6 +34,10 @@
 extern void ble_store_config_init(void);
 /* ble_hs_id_priv.h */
 extern void ble_hs_id_set_pub(const uint8_t* pub_addr);
+/* ble_hs_priv.h */
+extern uint16_t ble_hs_max_attrs;
+extern uint16_t ble_hs_max_services;
+extern uint16_t ble_hs_max_client_configs;
 
 static struct {
     FuriThread* host;
@@ -42,6 +47,9 @@ static struct {
     volatile bool pairing;
     volatile bool adv_disabled;
     volatile bool hid_advertised;
+    volatile bool gatt_rebuilding;
+    /* The last rebuild failed; the table needs one even if nothing changed. */
+    bool gatt_retry;
     volatile uint32_t passkey;
     volatile uint16_t conn_handle;
     uint8_t addr_type;
@@ -52,6 +60,8 @@ static struct ble_npl_event disconnect_event;
 static struct ble_npl_event forget_event;
 static struct ble_npl_event reload_event;
 static struct ble_npl_event readvertise_event;
+static struct ble_npl_event gatt_rebuild_event;
+static struct ble_npl_callout gatt_retry_callout;
 
 static int gap_event(struct ble_gap_event* event, void* arg);
 
@@ -100,7 +110,7 @@ static void start_advertise(void) {
 }
 
 static void maybe_advertise(void) {
-    if(!glue.synced || glue.adv_disabled || glue.advertising) return;
+    if(!glue.synced || glue.adv_disabled || glue.advertising || glue.gatt_rebuilding) return;
     if(glue.conn_handle != BLE_HS_CONN_HANDLE_NONE) return;
     start_advertise();
 }
@@ -142,7 +152,11 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         hid_gatt_set_conn(0, false);
         /* CCCDs written during the connection. */
         bond_store_save();
-        maybe_advertise();
+        if(glue.gatt_rebuilding) {
+            ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &gatt_rebuild_event);
+        } else {
+            maybe_advertise();
+        }
         break;
 
     case BLE_GAP_EVENT_ADV_COMPLETE:
@@ -152,6 +166,11 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
 
     case BLE_GAP_EVENT_NOTIFY_TX:
         serial_gatt_on_notify_tx(event->notify_tx.attr_handle, event->notify_tx.status);
+        dyn_gatt_on_notify_tx(
+            event->notify_tx.conn_handle,
+            event->notify_tx.attr_handle,
+            event->notify_tx.status,
+            event->notify_tx.indication);
         break;
 
     case BLE_GAP_EVENT_SUBSCRIBE:
@@ -159,6 +178,11 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             event->subscribe.attr_handle,
             event->subscribe.cur_notify || event->subscribe.cur_indicate);
         hid_gatt_on_subscribe(event->subscribe.attr_handle, event->subscribe.cur_notify);
+        dyn_gatt_on_subscribe(
+            event->subscribe.conn_handle,
+            event->subscribe.attr_handle,
+            event->subscribe.cur_notify,
+            event->subscribe.cur_indicate);
         break;
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
@@ -208,6 +232,9 @@ static void on_sync(void) {
     }
     glue.synced = true;
     hid_gatt_set_visible(glue.hid_advertised, false);
+    if(dyn_gatt_dirty() || glue.gatt_retry) {
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &gatt_rebuild_event);
+    }
     maybe_advertise();
 }
 
@@ -264,6 +291,69 @@ static void readvertise_event_fn(struct ble_npl_event* ev) {
     maybe_advertise();
 }
 
+static int register_services(void) {
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+    int rc = info_gatt_register();
+    if(rc == 0) rc = serial_gatt_register();
+    if(rc == 0) rc = hid_gatt_register();
+    return rc;
+}
+
+/* NimBLE changes its table only with no link and no GAP procedure. The
+ * built-in services register first, in boot order, so their handles and the
+ * CCCDs bonded peers cached stay put. */
+static void gatt_rebuild_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    if(!glue.synced || !(dyn_gatt_dirty() || glue.gatt_retry)) {
+        /* After a controller reset, on_sync starts it again. */
+        glue.gatt_rebuilding = false;
+        maybe_advertise();
+        return;
+    }
+    glue.gatt_rebuilding = true;
+    if(glue.advertising) {
+        ble_gap_adv_stop();
+        glue.advertising = false;
+    }
+    if(glue.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        /* Continues on the disconnect event. */
+        ble_gap_terminate(glue.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        return;
+    }
+
+    int rc = ble_gatts_reset();
+    if(rc == 0) {
+        /* NimBLE 1.10.0's ble_gatts_reset leaves these, and they would grow
+         * with every rebuild. Fixed upstream in af4baa41. */
+        ble_hs_max_attrs = 0;
+        ble_hs_max_services = 0;
+        ble_hs_max_client_configs = 0;
+        rc = register_services();
+        if(rc == 0) {
+            dyn_gatt_register_all();
+            rc = ble_gatts_start();
+        }
+    }
+    glue.gatt_retry = rc != 0;
+    if(rc == 0) {
+        dyn_gatt_after_start();
+        hid_gatt_set_visible(glue.hid_advertised, false);
+        ble_svc_gatt_changed(0x0001, 0xFFFF);
+    } else {
+        FURI_LOG_E(TAG, "GATT rebuild failed: %d", rc);
+    }
+    if(glue.gatt_retry) {
+        /* Stays gatt_rebuilding, so nothing advertises the broken table. */
+        ble_npl_callout_reset(&gatt_retry_callout, ble_npl_time_ms_to_ticks32(200));
+    } else if(dyn_gatt_dirty()) {
+        ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &gatt_rebuild_event);
+    } else {
+        glue.gatt_rebuilding = false;
+        maybe_advertise();
+    }
+}
+
 static void post(struct ble_npl_event* ev) {
     if(glue.started) ble_npl_eventq_put(nimble_port_get_dflt_eventq(), ev);
 }
@@ -287,20 +377,22 @@ bool nimble_glue_start(void) {
     ble_npl_event_init(&forget_event, forget_event_fn, NULL);
     ble_npl_event_init(&reload_event, reload_event_fn, NULL);
     ble_npl_event_init(&readvertise_event, readvertise_event_fn, NULL);
+    ble_npl_event_init(&gatt_rebuild_event, gatt_rebuild_event_fn, NULL);
+    ble_npl_callout_init(
+        &gatt_retry_callout, nimble_port_get_dflt_eventq(), gatt_rebuild_event_fn, NULL);
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
-    ble_svc_gap_init();
-    ble_svc_gatt_init();
     ble_store_config_init();
     bond_store_load();
 
     const char* name = furi_hal_version_get_device_name_ptr();
     ble_svc_gap_device_name_set(name ? name : "Flipper");
 
-    if(info_gatt_register() != 0 || serial_gatt_register() != 0 || hid_gatt_register() != 0)
-        return false;
+    info_gatt_init();
+    dyn_gatt_init();
+    if(register_services() != 0) return false;
     serial_gatt_init();
 
     glue.host = furi_thread_alloc_ex("NimbleHost", HOST_STACK_SIZE, host_task, NULL);
@@ -371,4 +463,8 @@ void nimble_glue_hid_set_report_map(const uint8_t* data, uint16_t len) {
 
 bool nimble_glue_hid_input_report(uint8_t report_id, const uint8_t* data, uint16_t len) {
     return glue.started && hid_gatt_input_report(report_id, data, len);
+}
+
+void nimble_glue_gatt_rebuild(void) {
+    post(&gatt_rebuild_event);
 }
