@@ -5,7 +5,6 @@
 #include <dolphin/dolphin.h>
 #include <power/power_service/power.h>
 #include <storage/storage.h>
-#include <assets_icons.h>
 
 #include "views/bubble_animation_view.h"
 #include "views/one_shot_animation_view.h"
@@ -23,6 +22,8 @@
 #define SD_OK_ANIMATION_NAME    "L0_SdOk_128x51"
 #define URL_ANIMATION_NAME      "L0_Url_128x51"
 #define NEW_MAIL_ANIMATION_NAME "L0_NewMail_128x51"
+#define LEVELUP1_ANIMATION_NAME "Levelup1_128x64"
+#define LEVELUP2_ANIMATION_NAME "Levelup2_128x64"
 
 typedef enum {
     AnimationManagerStateIdle,
@@ -37,6 +38,7 @@ struct AnimationManager {
     FuriPubSubSubscription* pubsub_subscription_dolphin;
     BubbleAnimationView* animation_view;
     OneShotView* one_shot_view;
+    StorageAnimation* levelup_animation;
     FuriTimer* idle_animation_timer;
     StorageAnimation* current_animation;
     AnimationManagerInteractCallback interact_callback;
@@ -66,7 +68,7 @@ static bool animation_manager_check_blocking(AnimationManager* animation_manager
 static bool animation_manager_is_valid_idle_animation(
     const StorageAnimationManifestInfo* info,
     const DolphinStats* stats);
-static void animation_manager_switch_to_one_shot_view(AnimationManager* animation_manager);
+static bool animation_manager_switch_to_one_shot_view(AnimationManager* animation_manager);
 static void animation_manager_switch_to_animation_view(AnimationManager* animation_manager);
 
 void animation_manager_set_context(AnimationManager* animation_manager, void* context) {
@@ -194,11 +196,16 @@ bool animation_manager_interact_process(AnimationManager* animation_manager) {
 
     if(animation_manager->levelup_pending) {
         animation_manager->levelup_pending = false;
-        animation_manager->levelup_active = true;
-        animation_manager_switch_to_one_shot_view(animation_manager);
+        /* Pick the animation before upgrading: it is chosen by the current level. */
+        animation_manager->levelup_active =
+            animation_manager_switch_to_one_shot_view(animation_manager);
         Dolphin* dolphin = furi_record_open(RECORD_DOLPHIN);
         dolphin_upgrade_level(dolphin);
         furi_record_close(RECORD_DOLPHIN);
+        if(!animation_manager->levelup_active) {
+            /* No animation on the SD card: the level still goes up. */
+            animation_manager_start_new_idle(animation_manager);
+        }
     } else if(animation_manager->levelup_active) {
         animation_manager->levelup_active = false;
         animation_manager_start_new_idle(animation_manager);
@@ -468,6 +475,14 @@ void animation_manager_unload_and_stall_animation(AnimationManager* animation_ma
         (animation_manager->state == AnimationManagerStateIdle) ||
         (animation_manager->state == AnimationManagerStateBlocked));
 
+    /* The level-up frames live on the heap: do not keep them while an app runs.
+     * The level went up, so the desktop resumes on an idle animation. */
+    if(animation_manager->levelup_active) {
+        animation_manager->levelup_active = false;
+        animation_manager_start_new_idle(animation_manager);
+        animation_manager_switch_to_animation_view(animation_manager);
+    }
+
     if(animation_manager->state == AnimationManagerStateBlocked) {
         animation_manager->state = AnimationManagerStateFreezedBlocked;
     } else if(animation_manager->state == AnimationManagerStateIdle) { //-V547
@@ -569,12 +584,36 @@ void animation_manager_load_and_continue_animation(AnimationManager* animation_m
     furi_assert(animation_manager->current_animation);
 }
 
-static void animation_manager_switch_to_one_shot_view(AnimationManager* animation_manager) {
+/* Loads the level-up animation from the SD card. Returns false, leaving the view
+ * untouched, if it cannot. */
+static bool animation_manager_switch_to_one_shot_view(AnimationManager* animation_manager) {
     furi_assert(animation_manager);
     furi_assert(!animation_manager->one_shot_view);
+    furi_assert(!animation_manager->levelup_animation);
     Dolphin* dolphin = furi_record_open(RECORD_DOLPHIN);
     DolphinStats stats = dolphin_stats(dolphin);
     furi_record_close(RECORD_DOLPHIN);
+
+    const char* name = NULL;
+    if(stats.level == 1) {
+        name = LEVELUP1_ANIMATION_NAME;
+    } else if(stats.level == 2) {
+        name = LEVELUP2_ANIMATION_NAME;
+    } else {
+        return false;
+    }
+
+    StorageAnimation* levelup = animation_storage_find_animation(name);
+    if(!levelup) {
+        FURI_LOG_W(TAG, "Level-up animation %s not found on SD card", name);
+        return false;
+    }
+    const Icon* icon = &animation_storage_get_bubble_animation(levelup)->icon_animation;
+    if(icon->frame_count < 2 || !icon->frame_rate) {
+        animation_storage_free_storage_animation(&levelup);
+        return false;
+    }
+    animation_manager->levelup_animation = levelup;
 
     animation_manager->one_shot_view = one_shot_view_alloc();
     one_shot_view_set_interact_callback(
@@ -583,13 +622,8 @@ static void animation_manager_switch_to_one_shot_view(AnimationManager* animatio
     View* next_view = one_shot_view_get_view(animation_manager->one_shot_view);
     view_stack_remove_view(animation_manager->view_stack, prev_view);
     view_stack_add_view(animation_manager->view_stack, next_view);
-    if(stats.level == 1) {
-        one_shot_view_start_animation(animation_manager->one_shot_view, &A_Levelup1_128x64);
-    } else if(stats.level == 2) {
-        one_shot_view_start_animation(animation_manager->one_shot_view, &A_Levelup2_128x64);
-    } else {
-        furi_crash();
-    }
+    one_shot_view_start_animation(animation_manager->one_shot_view, icon);
+    return true;
 }
 
 static void animation_manager_switch_to_animation_view(AnimationManager* animation_manager) {
@@ -602,4 +636,5 @@ static void animation_manager_switch_to_animation_view(AnimationManager* animati
     view_stack_add_view(animation_manager->view_stack, next_view);
     one_shot_view_free(animation_manager->one_shot_view);
     animation_manager->one_shot_view = NULL;
+    animation_storage_free_storage_animation(&animation_manager->levelup_animation);
 }
