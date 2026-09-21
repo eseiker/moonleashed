@@ -193,7 +193,149 @@ static void conn_handle_track(uint16_t handle, bool up) {
     }
 }
 
+/* Extra beacon (TASK-810). ST's CPU2 host ran a second, non-connectable
+ * advertiser next to the companion's. This radio has one legacy advertising
+ * set, so while an app runs a beacon it takes the advertiser over: the
+ * companion advertisement pauses, links stay up, and the companion
+ * advertisement returns when the beacon stops. BLE Spam style apps restart the
+ * beacon every few tens of milliseconds with a new address, which leaves no
+ * room to alternate. The beacon advertises from the random address the app
+ * configured. The app thread only fills this in and posts beacon_event; the
+ * GAP calls run on the host thread (KNOW-703). */
+static struct {
+    volatile bool wanted; /* the app started it */
+    volatile bool restart; /* started again with a new config since it went on air */
+    volatile bool data_dirty;
+    volatile bool queued;
+    bool running; /* host thread: on the air */
+    uint8_t data[31];
+    uint8_t len;
+    uint16_t itvl_min, itvl_max; /* 0.625 ms units */
+    uint8_t chan_map;
+    uint8_t addr[6];
+} beacon;
+static struct ble_npl_event beacon_event;
+static void maybe_advertise(void);
+
+static int beacon_gap_event(struct ble_gap_event* event, void* arg) {
+    UNUSED(event);
+    UNUSED(arg);
+    return 0;
+}
+
+/* Hand the current payload to the controller. Copy it under the critical
+ * section only: ble_gap_adv_set_data waits for the controller's answer, and
+ * waiting with interrupts off hung the whole device. */
+static void beacon_set_data(void) {
+    uint8_t data[sizeof(beacon.data)];
+    FURI_CRITICAL_ENTER();
+    uint8_t len = beacon.len;
+    memcpy(data, beacon.data, len);
+    FURI_CRITICAL_EXIT();
+    ble_gap_adv_set_data(data, len);
+}
+
+/* Host thread. Returns true while an app wants the beacon, and the caller must
+ * then not advertise the companion. */
+static bool beacon_run(void) {
+    if(!beacon.wanted) return false;
+    if(beacon.running && !beacon.restart) {
+        if(beacon.data_dirty) {
+            beacon.data_dirty = false;
+            beacon_set_data();
+        }
+        return true;
+    }
+    if(beacon.running || glue.advertising) ble_gap_adv_stop();
+    glue.advertising = false;
+    beacon.running = false;
+    beacon.restart = false;
+    beacon.data_dirty = false;
+
+    uint8_t own = BLE_OWN_ADDR_RANDOM;
+    if(ble_hs_id_set_rnd(beacon.addr) != 0) {
+        /* NimBLE takes only a static (top bits 11) or non-resolvable (00)
+         * random address; make anything else static. */
+        beacon.addr[5] |= 0xC0;
+        if(ble_hs_id_set_rnd(beacon.addr) != 0) own = glue.addr_type;
+    }
+    beacon_set_data();
+    struct ble_gap_adv_params p = {0};
+    p.conn_mode = BLE_GAP_CONN_MODE_NON;
+    p.disc_mode = BLE_GAP_DISC_MODE_NON;
+    p.itvl_min = beacon.itvl_min;
+    p.itvl_max = beacon.itvl_max;
+    p.channel_map = beacon.chan_map;
+    int rc = ble_gap_adv_start(own, NULL, BLE_HS_FOREVER, &p, beacon_gap_event, NULL);
+    if(rc != 0) FURI_LOG_E(TAG, "Beacon start rc=%d", rc);
+    beacon.running = (rc == 0);
+    return true;
+}
+
+static void beacon_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    beacon.queued = false;
+    if(!glue.synced) return; /* on_sync runs maybe_advertise, which starts it */
+    if(!beacon.wanted && beacon.running) {
+        ble_gap_adv_stop();
+        beacon.running = false;
+        maybe_advertise();
+        /* A GATT rebuild requested during the beacon was deferred. */
+        if(glue.gatt_rebuild_pending) gatt_rebuild_post();
+        return;
+    }
+    beacon_run();
+}
+
+static void beacon_post(void) {
+    if(beacon.queued) return;
+    beacon.queued = true;
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &beacon_event);
+}
+
+bool nimble_glue_beacon_start(
+    const uint8_t* data,
+    uint8_t len,
+    uint16_t min_interval_ms,
+    uint16_t max_interval_ms,
+    uint8_t channel_map,
+    const uint8_t address[6]) {
+    if(!glue.started || len > sizeof(beacon.data)) return false;
+    FURI_CRITICAL_ENTER();
+    memcpy(beacon.data, data, len);
+    beacon.len = len;
+    FURI_CRITICAL_EXIT();
+    beacon.itvl_min = BLE_GAP_ADV_ITVL_MS(min_interval_ms);
+    beacon.itvl_max = BLE_GAP_ADV_ITVL_MS(max_interval_ms);
+    beacon.chan_map = channel_map;
+    memcpy(beacon.addr, address, sizeof(beacon.addr));
+    beacon.restart = true;
+    beacon.wanted = true;
+    beacon_post();
+    return true;
+}
+
+void nimble_glue_beacon_set_data(const uint8_t* data, uint8_t len) {
+    if(len > sizeof(beacon.data)) return;
+    FURI_CRITICAL_ENTER();
+    memcpy(beacon.data, data, len);
+    beacon.len = len;
+    FURI_CRITICAL_EXIT();
+    beacon.data_dirty = true;
+    if(beacon.wanted) beacon_post();
+}
+
+void nimble_glue_beacon_stop(void) {
+    beacon.wanted = false;
+    beacon_post();
+}
+
+bool nimble_glue_beacon_is_running(void) {
+    return beacon.running;
+}
+
 static void maybe_advertise(void) {
+    if(beacon_run()) return; /* an app's beacon owns the advertiser */
     if(glue.adv_disabled) return; /* Bluetooth is off in settings */
     if(glue.adv_halted) return; /* advertise-once: waiting for an explicit restart */
     if(glue.central_probe) return; /* a central session holds advertising off */
@@ -583,6 +725,7 @@ static void on_reset(int reason) {
     glue.synced = false;
     glue.scanning = false;
     glue.advertising = false; /* a reset controller advertises nothing */
+    beacon.running = false;
 }
 
 /* ST vendor command ACI_HAL_WRITE_CONFIG_DATA (OGF 0x3F, OCF 0x0C). Writing the
@@ -696,6 +839,7 @@ bool nimble_glue_start(NimbleMode mode) {
     ble_npl_event_init(&numcmp_event, numcmp_event_fn, NULL);
     ble_npl_event_init(&disconnect_event, disconnect_event_fn, NULL);
     ble_npl_event_init(&central_stop_event, central_stop_event_fn, NULL);
+    ble_npl_event_init(&beacon_event, beacon_event_fn, NULL);
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
 
@@ -967,6 +1111,9 @@ static void gatt_rebuild_event_fn(struct ble_npl_event* ev) {
         FURI_LOG_I(TAG, "GATT rebuild deferred until the central session ends");
         return;
     }
+    /* The table only changes with no GAP procedure running; beacon_event_fn
+     * posts the rebuild again once the beacon stops. */
+    if(beacon.running) return;
     if(!glue.gatt_rebuilding) {
         glue.gatt_rebuilding = true;
         if(glue.advertising) {

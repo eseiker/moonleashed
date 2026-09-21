@@ -98,6 +98,25 @@ void nimble_glue_set_hid_advertised(bool advertised);
 bool nimble_glue_numcmp_pending(void);
 void nimble_glue_numcmp_reply(bool accept);
 
+/* Extra beacon (TASK-810), behind furi_hal_bt_extra_beacon_*. A non-connectable
+ * advertisement of `data` from the random `address`, on the given channel map
+ * (bit 0 = channel 37) and interval range. It takes over the one advertising set
+ * this radio has: the companion advertisement pauses while it runs and returns
+ * when it stops; connections stay up. Safe from any thread; the work runs on the
+ * host thread, so start returns before the beacon is on the air. start again
+ * with a new config restarts it; set_data updates it in place. */
+bool nimble_glue_beacon_start(
+    const uint8_t* data,
+    uint8_t len,
+    uint16_t min_interval_ms,
+    uint16_t max_interval_ms,
+    uint8_t channel_map,
+    const uint8_t address[6]);
+void nimble_glue_beacon_set_data(const uint8_t* data, uint8_t len);
+void nimble_glue_beacon_stop(void);
+/* True while the beacon is on the air. */
+bool nimble_glue_beacon_is_running(void);
+
 /* Advertise the installed payload again after advertise-once stopped it. */
 void nimble_glue_adv_restart(void);
 

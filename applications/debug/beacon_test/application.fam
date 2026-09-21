@@ -1,0 +1,9 @@
+App(
+    appid="beacon_test",
+    name="Extra Beacon Test",
+    apptype=FlipperAppType.DEBUG,
+    entry_point="beacon_test_app",
+    sources=["beacon_test_app.c"],
+    stack_size=2048,
+    fap_category="Debug",
+)

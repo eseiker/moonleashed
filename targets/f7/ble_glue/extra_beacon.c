@@ -3,6 +3,7 @@
 
 #include <ble/ble.h>
 #include <furi.h>
+#include <nimble_glue.h>
 
 #define TAG "BleExtraBeacon"
 
@@ -71,12 +72,21 @@ bool gap_extra_beacon_start(void) {
         return false;
     }
 
-    /* The additional-beacon feature belongs to ST's CPU2 host. This fork ships
-     * the HCILayer radio, a bare controller that does not implement it, so the
-     * request is refused instead of sending an ACI command nothing answers
-     * (TASK-696). */
-    FURI_LOG_E(TAG, "extra beacon needs the ST CPU2 host, which this radio has not");
-    return false;
+    /* The additional beacon belonged to ST's CPU2 host, which the HCILayer radio
+     * does not carry. The resident NimBLE host runs it on its one advertising
+     * set instead, pausing the companion advertisement meanwhile (TASK-810). */
+    furi_mutex_acquire(extra_beacon.state_mutex, FuriWaitForever);
+    const GapExtraBeaconConfig* config = &extra_beacon.last_config;
+    bool started = nimble_glue_beacon_start(
+        extra_beacon.extra_beacon_data,
+        extra_beacon.extra_beacon_data_len,
+        config->min_adv_interval_ms,
+        config->max_adv_interval_ms,
+        config->adv_channel_map,
+        config->address);
+    if(started) extra_beacon.extra_beacon_state = GapExtraBeaconStateStarted;
+    furi_mutex_release(extra_beacon.state_mutex);
+    return started;
 }
 
 bool gap_extra_beacon_stop(void) {
@@ -86,8 +96,9 @@ bool gap_extra_beacon_stop(void) {
         return false;
     }
 
-    /* Never started, so there is nothing to stop. See gap_extra_beacon_start. */
-    return false;
+    nimble_glue_beacon_stop();
+    extra_beacon.extra_beacon_state = GapExtraBeaconStateStopped;
+    return true;
 }
 
 bool gap_extra_beacon_set_data(const uint8_t* data, uint8_t length) {
@@ -100,11 +111,11 @@ bool gap_extra_beacon_set_data(const uint8_t* data, uint8_t length) {
         memcpy(extra_beacon.extra_beacon_data, data, length);
     }
     extra_beacon.extra_beacon_data_len = length;
-
-    /* The data is kept so a caller can read it back, but there is no beacon to
-     * push it to. See gap_extra_beacon_start. */
+    if(extra_beacon.extra_beacon_state == GapExtraBeaconStateStarted) {
+        nimble_glue_beacon_set_data(data, length);
+    }
     furi_mutex_release(extra_beacon.state_mutex);
-    return false;
+    return true;
 }
 
 uint8_t gap_extra_beacon_get_data(uint8_t* data) {
