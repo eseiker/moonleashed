@@ -58,6 +58,25 @@ void nimble_glue_beacon_stop(void);
 /* False once the beacon is stopped, or failed to start on the host thread. */
 bool nimble_glue_beacon_is_wanted(void);
 
+/* Run cleanup whenever an app stops, so an app that exits without its deinit
+ * leaves no callback behind. Idempotent; call it from an app thread. */
+void nimble_glue_on_app_stop(void (*cleanup)(void));
+
+/* A central session: scan for a peer advertising `name` and connect to it.
+ * The companion's link stays up; advertising pauses until the session ends.
+ * cb runs on the host thread and must not block. One session at a time. */
+typedef enum {
+    NimbleCentralConnected, /* conn_handle is valid */
+    NimbleCentralDisconnected, /* status is the disconnect reason */
+    NimbleCentralFailed, /* status is the NimBLE error */
+} NimbleCentralEventKind;
+typedef void (
+    *NimbleCentralCb)(NimbleCentralEventKind kind, uint16_t conn_handle, int status, void* ctx);
+bool nimble_glue_central_start(const char* name, NimbleCentralCb cb, void* ctx);
+/* No callback runs after this returns; the link drops on the host thread.
+ * The next session can start once the host has let go of this one. */
+void nimble_glue_central_stop(void);
+
 /* Radio tests on the HCILayer radio: Direct Test Mode, the ST carrier tone,
  * and the RSSI while an RX test runs. Stop advertising and drop the link
  * first. Called from the CLI thread: they only send HCI commands, which

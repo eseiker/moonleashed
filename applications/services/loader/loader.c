@@ -1010,6 +1010,11 @@ static void loader_do_app_closed(Loader* loader) {
     furi_thread_join(loader->app.thread);
     FURI_LOG_I(TAG, "App returned: %li", furi_thread_get_return_code(loader->app.thread));
 
+    // Before the app's code is freed, so subscribers can drop callbacks into it
+    LoaderEvent event;
+    event.type = LoaderEventTypeApplicationStopped;
+    furi_pubsub_publish(loader->pubsub, &event);
+
     if(loader->app.args) {
         free(loader->app.args);
         loader->app.args = NULL;
@@ -1031,10 +1036,6 @@ static void loader_do_app_closed(Loader* loader) {
     furi_string_free(loader->app.launch_path);
 
     FURI_LOG_I(TAG, "Application stopped. Free heap: %zu", memmgr_get_free_heap());
-
-    LoaderEvent event;
-    event.type = LoaderEventTypeApplicationStopped;
-    furi_pubsub_publish(loader->pubsub, &event);
 
     loader_do_next_deferred_launch_if_available(loader);
 }

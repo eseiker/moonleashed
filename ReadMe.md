@@ -23,6 +23,7 @@ The previous line of development (v1) is kept on the [`v1/main`](../../tree/v1/m
 - **LE Secure Connections**, with the elliptic-curve work on the chip's PKA accelerator (`bt pka_test` checks it).
 - **Radio tests work on the HCILayer radio**: the `bt` CLI carrier, packet and RSSI tests (debug mode).
 - **The extra beacon works**, so BLE Spam–style apps transmit again. While a beacon runs, the companion advertisement pauses; connections stay up.
+- **Apps can connect as central** (`furi_ble_session`) while the companion keeps its link, and drop any link (`ble_link_disconnect`).
 
 Everything else follows upstream Unleashed. See its README and changelog for features.
 
