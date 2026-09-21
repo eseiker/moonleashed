@@ -9,6 +9,7 @@
 #include "bt_settings.h"
 #include "bt_service/bt.h"
 #include <profiles/serial_profile.h>
+#include <nimble_glue.h>
 
 static void bt_cli_command_hci_info(PipeSide* pipe, FuriString* args, void* context) {
     UNUSED(pipe);
@@ -167,11 +168,20 @@ static void bt_cli_command_packet_rx(PipeSide* pipe, FuriString* args, void* con
     } while(false);
 }
 
+static void bt_cli_command_pka_test(PipeSide* pipe, FuriString* args, void* context) {
+    UNUSED(pipe);
+    UNUSED(args);
+    UNUSED(context);
+    printf("PKA P-256: %s\r\n", sm_alg_pka_selftest() ? "PASS" : "FAIL");
+    printf("AES-CMAC: %s\r\n", sm_cmac_selftest() ? "PASS" : "FAIL");
+}
+
 static void bt_cli_print_usage(void) {
     printf("Usage:\r\n");
     printf("bt <cmd> <args>\r\n");
     printf("Cmd list:\r\n");
     printf("\thci_info\t - HCI info\r\n");
+    printf("\tpka_test\t - Secure Connections crypto self-tests\r\n");
     if(furi_hal_rtc_is_flag_set(FuriHalRtcFlagDebug) && furi_hal_bt_is_testing_supported()) {
         printf("\ttx_carrier <channel:0-39> <power:0-6>\t - start tx carrier test\r\n");
         printf("\trx_carrier <channel:0-39>\t - start rx carrier test\r\n");
@@ -197,6 +207,10 @@ static void bt_cli(PipeSide* pipe, FuriString* args, void* context) {
         }
         if(furi_string_cmp_str(cmd, "hci_info") == 0) {
             bt_cli_command_hci_info(pipe, args, NULL);
+            break;
+        }
+        if(furi_string_cmp_str(cmd, "pka_test") == 0) {
+            bt_cli_command_pka_test(pipe, args, NULL);
             break;
         }
         if(furi_hal_rtc_is_flag_set(FuriHalRtcFlagDebug) && furi_hal_bt_is_testing_supported()) {

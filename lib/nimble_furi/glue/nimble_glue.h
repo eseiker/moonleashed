@@ -41,6 +41,10 @@ bool nimble_glue_hid_input_report(uint8_t report_id, const uint8_t* data, uint16
  * re-advertises, like a stock profile change. */
 void nimble_glue_gatt_rebuild(void);
 
+/* Crypto self-tests against the NIST P-256 and RFC 4493 vectors. */
+bool sm_alg_pka_selftest(void);
+bool sm_cmac_selftest(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -42,6 +42,8 @@ libenv.Append(
 libenv.ApplyLibFlags()
 
 sources = libenv.GlobRecursive("*_ll_*.c", "stm32wb_hal/Src/", exclude="*usb.c")
+# PKA has no LL API for elliptic-curve multiplication; see stm32wbxx_hal_conf.h
+sources += [File("stm32wb_hal/Src/stm32wbxx_hal_pka.c")]
 sources += Glob(
     "stm32wb_copro/wpan/interface/patterns/ble_thread/shci/*.c",
     source=True,
