@@ -213,12 +213,15 @@ void furi_hal_bt_reinit(void) {
         current_profile = NULL;
     }
 
-    // Magic happens here
-    hci_reset();
+    // Only the stock host runs on ST's HCI transport
+    if(furi_hal_bt_is_gatt_gap_supported()) {
+        // Magic happens here
+        hci_reset();
 
-    FURI_LOG_I(TAG, "Stop BLE related RTOS threads");
-    gap_thread_stop();
-    ble_app_deinit();
+        FURI_LOG_I(TAG, "Stop BLE related RTOS threads");
+        gap_thread_stop();
+        ble_app_deinit();
+    }
 
     FURI_LOG_I(TAG, "Reset SHCI");
     furi_check(ble_glue_reinit_c2());
@@ -329,7 +332,18 @@ bool furi_hal_bt_clear_white_list(void) {
 void furi_hal_bt_dump_state(FuriString* buffer) {
     furi_check(buffer);
 
-    if(furi_hal_bt_is_alive()) {
+    if(nimble_glue_is_started()) {
+        const BleGlueC2Info* info = ble_glue_get_c2_info();
+        furi_string_cat_printf(
+            buffer,
+            "NimBLE host, radio stack type %d, %d.%d.%d, advertising %d, connected %d",
+            info->StackType,
+            info->VersionMajor,
+            info->VersionMinor,
+            info->VersionSub,
+            nimble_glue_is_advertising(),
+            nimble_glue_is_connected());
+    } else if(furi_hal_bt_is_alive()) {
         uint8_t HCI_Version;
         uint16_t HCI_Revision;
         uint8_t LMP_PAL_Version;
