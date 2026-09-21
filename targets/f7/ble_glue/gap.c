@@ -121,6 +121,11 @@ BleEventFlowStatus ble_event_app_notification(void* pckt) {
     uint8_t rx_phy;
     tBleStatus ret = BLE_STATUS_INVALID_PARAMS;
 
+    // Runtime GATT events under NimBLE that no service handler took
+    if(!gap) {
+        return BleEventFlowEnable;
+    }
+
     event_pckt = (hci_event_pckt*)((hci_uart_pckt*)pckt)->data;
 
     furi_check(gap);

@@ -119,7 +119,7 @@ static void chr_updated_fn(struct ble_npl_event* ev) {
     ble_gatts_chr_updated(*(uint16_t*)ble_npl_event_get_arg(ev));
 }
 
-int info_gatt_register(void) {
+void info_gatt_init(void) {
     snprintf(
         software_revision,
         sizeof(software_revision),
@@ -132,7 +132,9 @@ int info_gatt_register(void) {
 
     ble_npl_event_init(&level_event, chr_updated_fn, &h_level);
     ble_npl_event_init(&power_state_event, chr_updated_fn, &h_power_state);
+}
 
+int info_gatt_register(void) {
     int rc = ble_gatts_count_cfg(svcs);
     if(rc == 0) rc = ble_gatts_add_svcs(svcs);
     return rc;

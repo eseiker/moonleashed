@@ -2,8 +2,8 @@
 
 /* Firmware-internal, outside the SDK headers. While a shim is installed, the
  * ble_gatt_* primitives do not talk to CPU2: they hand out placeholder handles
- * and pass every characteristic update to on_update. App profiles linked from
- * lib/ble_profile then run on a host that serves the services itself. */
+ * and pass updates of HID, Battery and Device Information to on_update. Other
+ * services become runtime services on the host. */
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -34,6 +34,10 @@ void ble_gatt_host_shim_set(const BleGattHostShim* shim);
 
 /** A running profile added the HID service. */
 bool ble_gatt_host_shim_has_hid(void);
+
+/** Put services added or removed since the last call on the air. Drops the
+ *  link and re-advertises, like a stock profile change. No-op if none. */
+void ble_gatt_host_shim_commit(void);
 
 #ifdef __cplusplus
 }

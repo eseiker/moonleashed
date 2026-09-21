@@ -37,6 +37,10 @@ void nimble_glue_hid_set_report_map(const uint8_t* data, uint16_t len);
 /* See hid_gatt_input_report. */
 bool nimble_glue_hid_input_report(uint8_t report_id, const uint8_t* data, uint16_t len);
 
+/* Put services changed through dyn_gatt on the air. Drops the link and
+ * re-advertises, like a stock profile change. */
+void nimble_glue_gatt_rebuild(void);
+
 #ifdef __cplusplus
 }
 #endif
