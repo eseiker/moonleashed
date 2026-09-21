@@ -16,6 +16,9 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
+#include <furi_ble/link.h>
+#include <loader/loader.h>
+
 #include "nimble_glue.h"
 #include "serial_gatt.h"
 #include "info_gatt.h"
@@ -64,6 +67,28 @@ static struct ble_npl_event reload_event;
 static struct ble_npl_event readvertise_event;
 static struct ble_npl_event gatt_rebuild_event;
 static struct ble_npl_callout gatt_retry_callout;
+
+/* One central session at a time. The companion's peripheral link stays up;
+ * advertising pauses until the session ends. */
+static struct {
+    volatile bool active;
+    volatile bool stop_pending; /* stop posted, not handled yet */
+    bool stopping; /* host thread */
+    uint16_t conn_handle;
+    char name[30]; /* the longest name a legacy advertisement carries, plus NUL */
+    NimbleCentralCb cb;
+    void* ctx;
+} central;
+static FuriMutex* central_mutex;
+static struct ble_npl_event central_start_event;
+static struct ble_npl_event central_stop_event;
+
+/* Links an app asked to drop, handled on the host thread. */
+static struct {
+    uint16_t handle;
+    uint8_t reason;
+} terminate_queue[MYNEWT_VAL(BLE_MAX_CONNECTIONS)];
+static struct ble_npl_event terminate_event;
 
 static int gap_event(struct ble_gap_event* event, void* arg);
 
@@ -192,6 +217,7 @@ static void start_advertise(void) {
 static void maybe_advertise(void) {
     if(glue.synced && beacon_run()) return;
     if(!glue.synced || glue.adv_disabled || glue.advertising || glue.gatt_rebuilding) return;
+    if(central.active) return;
     if(glue.conn_handle != BLE_HS_CONN_HANDLE_NONE) return;
     start_advertise();
 }
@@ -320,11 +346,149 @@ static void on_sync(void) {
     maybe_advertise();
 }
 
+static void central_notify(NimbleCentralEventKind kind, uint16_t conn, int status) {
+    /* Held while the callback runs, so nimble_glue_central_stop can clear it
+     * without racing an event already on its way. */
+    furi_mutex_acquire(central_mutex, FuriWaitForever);
+    if(central.cb) central.cb(kind, conn, status, central.ctx);
+    furi_mutex_release(central_mutex);
+}
+
+/* Notify first: once active is false, a new session may install its callback. */
+static void central_end(NimbleCentralEventKind kind, uint16_t conn, int status) {
+    central_notify(kind, conn, status);
+    central.active = false;
+    central.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    maybe_advertise();
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &gatt_rebuild_event);
+}
+
+static int central_gap_event(struct ble_gap_event* event, void* arg) {
+    UNUSED(arg);
+    switch(event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        if(event->connect.status != 0) {
+            central_end(NimbleCentralFailed, 0, event->connect.status);
+            break;
+        }
+        central.conn_handle = event->connect.conn_handle;
+        if(central.stopping) {
+            // The cancel came too late; the disconnect event ends the session
+            ble_gap_terminate(central.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            break;
+        }
+        central_notify(NimbleCentralConnected, central.conn_handle, 0);
+        break;
+
+    case BLE_GAP_EVENT_DISCONNECT:
+        central_end(NimbleCentralDisconnected, central.conn_handle, event->disconnect.reason);
+        break;
+
+    // The peer may use our runtime GATT services over this link too
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        dyn_gatt_on_subscribe(
+            event->subscribe.conn_handle,
+            event->subscribe.attr_handle,
+            event->subscribe.cur_notify,
+            event->subscribe.cur_indicate);
+        break;
+
+    case BLE_GAP_EVENT_NOTIFY_TX:
+        dyn_gatt_on_notify_tx(
+            event->notify_tx.conn_handle,
+            event->notify_tx.attr_handle,
+            event->notify_tx.status,
+            event->notify_tx.indication);
+        break;
+
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        struct ble_gap_conn_desc desc;
+        if(ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
+            ble_store_util_delete_peer(&desc.peer_id_addr);
+        }
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
+
+    default:
+        break;
+    }
+    return 0;
+}
+
+/* Scan until a peer advertises the session's name, then connect to it. */
+static int central_disc_event(struct ble_gap_event* event, void* arg) {
+    UNUSED(arg);
+    if(event->type != BLE_GAP_EVENT_DISC || !central.active || central.stopping) return 0;
+
+    struct ble_hs_adv_fields fields;
+    size_t len = strlen(central.name);
+    if(ble_hs_adv_parse_fields(&fields, event->disc.data, event->disc.length_data) != 0 ||
+       fields.name_len != len || memcmp(fields.name, central.name, len) != 0) {
+        return 0;
+    }
+
+    ble_gap_disc_cancel();
+    int rc =
+        ble_gap_connect(glue.addr_type, &event->disc.addr, 5000, NULL, central_gap_event, NULL);
+    if(rc != 0) central_end(NimbleCentralFailed, 0, rc);
+    return 0;
+}
+
+static void central_start_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    if(!central.active) return;
+    if(glue.advertising) {
+        ble_gap_adv_stop();
+        glue.advertising = false;
+    }
+    struct ble_gap_disc_params params = {.filter_duplicates = 1};
+    int rc = ble_gap_disc(glue.addr_type, BLE_HS_FOREVER, &params, central_disc_event, NULL);
+    if(rc != 0) central_end(NimbleCentralFailed, 0, rc);
+}
+
+/* The session stays active until the host has let go of it, so the next one
+ * cannot start while a connect is still being cancelled. */
+static void central_stop_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    central.stop_pending = false;
+    if(!central.active || central.stopping) return;
+    central.stopping = true;
+    if(central.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+        // The disconnect event ends the session
+        ble_gap_terminate(central.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        return;
+    }
+    // The connect event ends the session: with BLE_HS_EAPP, or by terminating
+    // the link if the cancel came too late
+    if(ble_gap_conn_active()) {
+        ble_gap_conn_cancel();
+        return;
+    }
+    if(ble_gap_disc_active()) ble_gap_disc_cancel();
+    central_end(NimbleCentralFailed, 0, BLE_HS_EAPP);
+}
+
+static void terminate_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    for(size_t i = 0; i < COUNT_OF(terminate_queue); i++) {
+        FURI_CRITICAL_ENTER();
+        uint16_t handle = terminate_queue[i].handle;
+        uint8_t reason = terminate_queue[i].reason;
+        terminate_queue[i].handle = BLE_HS_CONN_HANDLE_NONE;
+        FURI_CRITICAL_EXIT();
+        if(handle != BLE_HS_CONN_HANDLE_NONE) ble_gap_terminate(handle, reason);
+    }
+}
+
 static void on_reset(int reason) {
     FURI_LOG_W(TAG, "Controller reset, reason %d", reason);
     glue.synced = false;
     glue.advertising = false;
     beacon.running = false;
+    /* A connected session ends through its disconnect event. */
+    if(central.active && central.conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+        central_end(NimbleCentralFailed, 0, BLE_HS_ECONTROLLER);
+    }
 }
 
 static void adv_setting_event_fn(struct ble_npl_event* ev) {
@@ -395,8 +559,9 @@ static void gatt_rebuild_event_fn(struct ble_npl_event* ev) {
         return;
     }
     glue.gatt_rebuilding = true;
-    /* Waits for the beacon to stop: the table changes only with no GAP procedure */
-    if(beacon.wanted) return;
+    /* Waits for the beacon and any central session: the table changes only
+     * with no link and no GAP procedure */
+    if(beacon.wanted || central.active) return;
     if(glue.advertising) {
         ble_gap_adv_stop();
         glue.advertising = false;
@@ -464,6 +629,10 @@ static int32_t host_task(void* context) {
 bool nimble_glue_start(void) {
     memset(&glue, 0, sizeof(glue));
     glue.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    central.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    central_mutex = furi_mutex_alloc(FuriMutexTypeNormal);
+    for(size_t i = 0; i < COUNT_OF(terminate_queue); i++)
+        terminate_queue[i].handle = BLE_HS_CONN_HANDLE_NONE;
 
     nimble_port_init();
     /* After nimble_port_init, which resets the msys pool list. */
@@ -478,6 +647,9 @@ bool nimble_glue_start(void) {
     ble_npl_callout_init(
         &gatt_retry_callout, nimble_port_get_dflt_eventq(), gatt_rebuild_event_fn, NULL);
     ble_npl_event_init(&beacon_event, beacon_event_fn, NULL);
+    ble_npl_event_init(&central_start_event, central_start_event_fn, NULL);
+    ble_npl_event_init(&central_stop_event, central_stop_event_fn, NULL);
+    ble_npl_event_init(&terminate_event, terminate_event_fn, NULL);
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
@@ -608,6 +780,91 @@ bool nimble_glue_beacon_is_wanted(void) {
 void nimble_glue_beacon_stop(void) {
     beacon.wanted = false;
     post(&beacon_event);
+}
+
+/* An app can exit without calling its furi_ble deinit, leaving callbacks into
+ * unloaded code. Each API registers its cleanup, which runs when any app stops. */
+static void (*app_cleanups[8])(void);
+static volatile bool loader_subscribed;
+
+// Loader thread
+static void on_loader_event(const void* message, void* context) {
+    UNUSED(context);
+    const LoaderEvent* event = message;
+    if(event->type != LoaderEventTypeApplicationStopped) return;
+    for(size_t i = 0; i < COUNT_OF(app_cleanups) && app_cleanups[i]; i++) {
+        app_cleanups[i]();
+    }
+}
+
+void nimble_glue_on_app_stop(void (*cleanup)(void)) {
+    bool registered = false;
+    FURI_CRITICAL_ENTER();
+    for(size_t i = 0; i < COUNT_OF(app_cleanups) && !registered; i++) {
+        if(!app_cleanups[i]) app_cleanups[i] = cleanup;
+        registered = app_cleanups[i] == cleanup;
+    }
+    bool subscribe = !loader_subscribed;
+    loader_subscribed = true;
+    FURI_CRITICAL_EXIT();
+    furi_check(registered);
+    // Called from an app, so the loader exists; the record stays open
+    if(subscribe) {
+        Loader* loader = furi_record_open(RECORD_LOADER);
+        furi_pubsub_subscribe(loader_get_pubsub(loader), on_loader_event, NULL);
+    }
+}
+
+bool nimble_glue_central_start(const char* name, NimbleCentralCb cb, void* ctx) {
+    if(!glue.synced || !name || !name[0] || strlen(name) >= sizeof(central.name)) return false;
+    furi_mutex_acquire(central_mutex, FuriWaitForever);
+    // A stop still queued for the last session must not end this one
+    bool start = !central.active && !central.stop_pending;
+    if(start) {
+        strlcpy(central.name, name, sizeof(central.name));
+        central.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        central.stopping = false;
+        central.cb = cb;
+        central.ctx = ctx;
+        central.active = true;
+    }
+    furi_mutex_release(central_mutex);
+    if(start) {
+        nimble_glue_on_app_stop(nimble_glue_central_stop);
+        post(&central_start_event);
+    }
+    return start;
+}
+
+void nimble_glue_central_stop(void) {
+    /* The caller frees its context next; no event may reach it after this. */
+    furi_mutex_acquire(central_mutex, FuriWaitForever);
+    central.cb = NULL;
+    central.ctx = NULL;
+    central.stop_pending = true;
+    furi_mutex_release(central_mutex);
+    post(&central_stop_event);
+}
+
+BleLinkDisconnectStatus ble_link_disconnect(uint16_t conn_handle, uint8_t reason) {
+    if(conn_handle == BLE_HS_CONN_HANDLE_NONE ||
+       (conn_handle != glue.conn_handle && conn_handle != central.conn_handle)) {
+        return BleLinkDisconnectNotConnected;
+    }
+    bool queued = false;
+    FURI_CRITICAL_ENTER();
+    for(size_t i = 0; i < COUNT_OF(terminate_queue) && !queued; i++) {
+        if(terminate_queue[i].handle == BLE_HS_CONN_HANDLE_NONE ||
+           terminate_queue[i].handle == conn_handle) {
+            terminate_queue[i].handle = conn_handle;
+            terminate_queue[i].reason = reason ? reason : BLE_ERR_REM_USER_CONN_TERM;
+            queued = true;
+        }
+    }
+    FURI_CRITICAL_EXIT();
+    if(!queued) return BleLinkDisconnectFailed;
+    post(&terminate_event);
+    return BleLinkDisconnectOk;
 }
 
 /* Radio tests. The caller stops advertising and drops the link first; those

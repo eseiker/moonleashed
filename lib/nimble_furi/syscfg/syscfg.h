@@ -2,10 +2,10 @@
 
 /* Overrides on top of upstream's generated config, which guards every value with #ifndef. */
 
-#define MYNEWT_VAL_BLE_ROLE_CENTRAL  (0)
-#define MYNEWT_VAL_BLE_ROLE_OBSERVER (0)
-#define MYNEWT_VAL_BLE_WHITELIST     (0)
-#define MYNEWT_VAL_BLE_HCI_VS        (1)
+/* The companion link plus one central link. */
+#define MYNEWT_VAL_BLE_MAX_CONNECTIONS (2)
+#define MYNEWT_VAL_BLE_WHITELIST       (0)
+#define MYNEWT_VAL_BLE_HCI_VS          (1)
 
 #define MYNEWT_VAL_BLE_ATT_SVR_READ_MULT    (0)
 #define MYNEWT_VAL_BLE_ATT_SVR_SIGNED_WRITE (0)
