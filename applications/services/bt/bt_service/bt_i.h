@@ -90,6 +90,9 @@ struct Bt {
     void* status_changed_ctx;
     uint32_t pin;
     bool suppress_pin_screen;
+    // NimBLE host on CPU1, for radios without a CPU2 host
+    bool nimble_active;
+    bool nimble_pin_shown;
 };
 
 /** Open a new RPC connection

@@ -1,6 +1,7 @@
 #include "ble_glue.h"
 #include <core/check.h>
 #include <gap.h>
+#include <nimble_glue.h>
 #include <furi_hal_bt.h>
 #include <furi_ble/profile_interface.h>
 
@@ -249,17 +250,24 @@ FuriHalBleProfileBase* furi_hal_bt_change_app(
 }
 
 bool furi_hal_bt_is_active(void) {
+    if(nimble_glue_is_started()) {
+        return nimble_glue_is_advertising() || nimble_glue_is_connected();
+    }
     return gap_get_state() > GapStateIdle;
 }
 
 void furi_hal_bt_start_advertising(void) {
-    if(gap_get_state() == GapStateIdle) {
+    if(nimble_glue_is_started()) {
+        nimble_glue_set_advertising_enabled(true);
+    } else if(gap_get_state() == GapStateIdle) {
         gap_start_advertising();
     }
 }
 
 void furi_hal_bt_stop_advertising(void) {
-    if(furi_hal_bt_is_active()) {
+    if(nimble_glue_is_started()) {
+        nimble_glue_set_advertising_enabled(false);
+    } else if(furi_hal_bt_is_active()) {
         gap_stop_advertising();
         while(furi_hal_bt_is_active()) {
             furi_delay_tick(1);
@@ -268,10 +276,18 @@ void furi_hal_bt_stop_advertising(void) {
 }
 
 void furi_hal_bt_update_battery_level(uint8_t battery_level) {
+    if(nimble_glue_is_started()) {
+        nimble_glue_set_battery_level(battery_level);
+        return;
+    }
     ble_svc_battery_state_update(&battery_level, NULL);
 }
 
 void furi_hal_bt_update_power_state(bool charging) {
+    if(nimble_glue_is_started()) {
+        nimble_glue_set_power_state(charging);
+        return;
+    }
     ble_svc_battery_state_update(NULL, &charging);
 }
 
@@ -297,6 +313,10 @@ void furi_hal_bt_nvm_sram_sem_release(void) {
 }
 
 bool furi_hal_bt_clear_white_list(void) {
+    if(nimble_glue_is_started()) {
+        nimble_glue_forget_bonds();
+        return true;
+    }
     furi_hal_bt_nvm_sram_sem_acquire();
     tBleStatus status = aci_gap_clear_security_db();
     if(status) {

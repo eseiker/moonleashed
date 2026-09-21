@@ -3,11 +3,13 @@
 
 #include <core/check.h>
 #include <furi_hal_bt.h>
+#include <furi_hal_bt_hci.h>
 #include <services/battery_service.h>
 #include <notification/notification_messages.h>
 #include <gui/elements.h>
 #include <assets_icons.h>
 #include <profiles/serial_profile.h>
+#include <nimble_glue.h>
 
 #define TAG "BtSrv"
 
@@ -92,7 +94,8 @@ static void bt_pin_code_show(Bt* bt, uint32_t pin_code) {
         gui_add_view_port(bt->gui, bt->pin_code_view_port, GuiLayerFullscreen);
     }
     notification_message(bt->notification, &sequence_display_backlight_on);
-    if(bt->suppress_pin_screen) return;
+    // NimBLE pairs by passkey only: without the number the peer cannot pair
+    if(bt->suppress_pin_screen && !bt->nimble_active) return;
 
     gui_view_port_send_to_front(bt->gui, bt->pin_code_view_port);
     view_port_enabled_set(bt->pin_code_view_port, true);
@@ -407,8 +410,36 @@ void bt_close_rpc_connection(Bt* bt) {
     }
 }
 
+// NimBLE serves the serial profile itself; other profiles need a GATT backend
+static void bt_nimble_change_profile(Bt* bt, BtMessage* message) {
+    const FuriHalBleProfileTemplate* template = message->data.profile.template;
+    // Sized like BleProfileSerial, so its accessors find NULL services
+    static struct {
+        FuriHalBleProfileBase base;
+        void* services[3];
+    } serial_profile;
+
+    // As stock, a profile change drops the link
+    nimble_glue_disconnect();
+
+    FuriHalBleProfileBase* instance = NULL;
+    if(!template || template == ble_profile_serial) {
+        serial_profile.base.config = ble_profile_serial;
+        instance = &serial_profile.base;
+        nimble_glue_set_advertising_enabled(bt->bt_settings.enabled);
+    } else {
+        bt_show_warning(bt, "Radio stack doesn't support this app");
+    }
+
+    bt->current_profile = instance;
+    if(message->profile_instance) *message->profile_instance = instance;
+    if(message->result) *message->result = instance != NULL;
+}
+
 static void bt_change_profile(Bt* bt, BtMessage* message) {
-    if(furi_hal_bt_is_gatt_gap_supported()) {
+    if(bt->nimble_active) {
+        bt_nimble_change_profile(bt, message);
+    } else if(furi_hal_bt_is_gatt_gap_supported()) {
         bt_settings_load(&bt->bt_settings);
 
         bt_close_rpc_connection(bt);
@@ -449,6 +480,10 @@ static void bt_change_profile(Bt* bt, BtMessage* message) {
 }
 
 static void bt_close_connection(Bt* bt) {
+    if(bt->nimble_active) {
+        nimble_glue_disconnect();
+        return;
+    }
     bt_close_rpc_connection(bt);
     furi_hal_bt_stop_advertising();
 }
@@ -531,6 +566,53 @@ static void bt_init_keys_settings(Bt* bt) {
     bt_handle_reload_keys_settings(bt);
 }
 
+// Mirrors the host state into the status bar and the PIN screen
+static void bt_nimble_poll_callback(void* context) {
+    Bt* bt = context;
+
+    BtStatus status = BtStatusOff;
+    if(nimble_glue_is_connected()) {
+        status = BtStatusConnected;
+    } else if(nimble_glue_is_advertising()) {
+        status = BtStatusAdvertising;
+    }
+    // A state counts as shown only once its message is queued
+    if(status != bt->status) {
+        BtStatus previous = bt->status;
+        bt->status = status;
+        BtMessage message = {.type = BtMessageTypeUpdateStatus};
+        if(furi_message_queue_put(bt->message_queue, &message, 0) != FuriStatusOk) {
+            bt->status = previous;
+        }
+    }
+
+    bool pairing = nimble_glue_is_pairing();
+    if(pairing != bt->nimble_pin_shown) {
+        // UpdateStatus hides the PIN screen
+        BtMessage message = {.type = BtMessageTypeUpdateStatus};
+        if(pairing) {
+            message.type = BtMessageTypePinCodeShow;
+            message.data.pin_code = nimble_glue_passkey();
+        }
+        if(furi_message_queue_put(bt->message_queue, &message, 0) == FuriStatusOk) {
+            bt->nimble_pin_shown = pairing;
+        }
+    }
+}
+
+// The HCILayer radio has no host on CPU2: run NimBLE on the raw controller
+static bool bt_nimble_start(Bt* bt) {
+    if(!furi_hal_bt_hci_acquire()) return false;
+    if(!nimble_glue_start()) {
+        furi_hal_bt_hci_release();
+        return false;
+    }
+    bt->nimble_active = true;
+    FuriTimer* timer = furi_timer_alloc(bt_nimble_poll_callback, FuriTimerTypePeriodic, bt);
+    furi_timer_start(timer, furi_ms_to_ticks(400));
+    return true;
+}
+
 int32_t bt_srv(void* p) {
     UNUSED(p);
     Bt* bt = bt_alloc();
@@ -548,6 +630,13 @@ int32_t bt_srv(void* p) {
         bt_init_keys_settings(bt);
         furi_hal_bt_set_key_storage_change_callback(bt_on_key_storage_change_callback, bt);
 
+    } else if(bt_nimble_start(bt)) {
+        bt_settings_load(&bt->bt_settings);
+        bt_apply_settings(bt);
+        // Bonds live on the card: pick them up if it mounts late
+        Storage* storage = furi_record_open(RECORD_STORAGE);
+        furi_pubsub_subscribe(storage_get_pubsub(storage), bt_storage_callback, bt);
+        furi_record_close(RECORD_STORAGE);
     } else {
         FURI_LOG_E(TAG, "Radio stack start failed");
     }
@@ -596,7 +685,11 @@ int32_t bt_srv(void* p) {
         } else if(message.type == BtMessageTypeSetSettings) {
             bt_handle_set_settings(bt, &message);
         } else if(message.type == BtMessageTypeReloadKeysSettings) {
-            bt_handle_reload_keys_settings(bt);
+            if(bt->nimble_active) {
+                nimble_glue_reload_bonds();
+            } else {
+                bt_handle_reload_keys_settings(bt);
+            }
         }
 
         if(message.lock) api_lock_unlock(message.lock);

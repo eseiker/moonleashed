@@ -234,6 +234,7 @@ void ble_svc_serial_stop(BleServiceSerial* serial_svc) {
 }
 
 bool ble_svc_serial_update_tx(BleServiceSerial* serial_svc, uint8_t* data, uint16_t data_len) {
+    furi_check(serial_svc);
     if(data_len > BLE_SVC_SERIAL_DATA_LEN_MAX) {
         return false;
     }
