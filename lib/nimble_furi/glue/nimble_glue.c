@@ -581,6 +581,7 @@ static void on_reset(int reason) {
     FURI_LOG_W(TAG, "Controller reset, reason=%d", reason);
     glue.synced = false;
     glue.scanning = false;
+    glue.advertising = false; /* a reset controller advertises nothing */
 }
 
 /* ST vendor command ACI_HAL_WRITE_CONFIG_DATA (OGF 0x3F, OCF 0x0C). Writing the
@@ -650,7 +651,9 @@ static void on_sync(void) {
         glue.addr[2],
         glue.addr[1],
         glue.addr[0]);
-    start_advertise();
+    /* Through the gates, so a resync after a radio test (TASK-809) honours the
+     * Bluetooth setting and a suspended companion. */
+    maybe_advertise();
 }
 
 static int32_t host_task(void* context) {
@@ -1252,9 +1255,38 @@ void nimble_glue_set_advertising_enabled(bool enabled) {
  * The caller runs these from the CLI thread with advertising stopped and links
  * dropped, so the host is otherwise idle; they need a synchronous result, which
  * is why they are not deferred to the host thread like the advertising setting.
+ *
+ * The caller only asks for advertising to stop and links to drop; the host
+ * thread does it later. So every test first waits for the link layer to report
+ * all eight slots idle through ACI_HAL_GET_LINK_STATUS, which this radio
+ * implements (TASK-809): idle 0x00, advertising 0x01, peripheral 0x02, TX test
+ * 0x06, RX test 0x07. A test started early is at best refused with Command
+ * Disallowed, and the radio has hard-faulted during these tests (KNOW-815).
  */
+#define ACI_HAL_GET_LINK_STATUS_OCF 0x0017
+#define LL_STATE_IDLE               0x00
+#define LL_STATE_RX_TEST            0x07
+
+/* True once slot 0 reports `state` and the other seven are idle. */
+static bool ll_wait(uint8_t state, uint32_t timeout_ms) {
+    uint8_t rsp[24]; /* 8 states, then 8 connection handles */
+    for(uint32_t waited = 0;; waited += 10) {
+        if(ble_hs_hci_send_vs_cmd(ACI_HAL_GET_LINK_STATUS_OCF, NULL, 0, rsp, sizeof(rsp)) != 0)
+            return false;
+        bool match = rsp[0] == state;
+        for(uint8_t i = 1; i < 8 && match; i++)
+            match = rsp[i] == LL_STATE_IDLE;
+        if(match) return true;
+        if(waited >= timeout_ms) {
+            FURI_LOG_E(TAG, "Link layer busy: %02X %02X", rsp[0], rsp[1]);
+            return false;
+        }
+        furi_delay_ms(10);
+    }
+}
 
 bool nimble_glue_dtm_tx_start(uint8_t channel, uint8_t payload, uint8_t phy) {
+    if(!ll_wait(LL_STATE_IDLE, 1000)) return false;
     struct ble_dtm_tx_params p = {
         .channel = channel,
         .test_data_len = 37, /* the maximum a test packet carries */
@@ -1267,6 +1299,7 @@ bool nimble_glue_dtm_tx_start(uint8_t channel, uint8_t payload, uint8_t phy) {
 }
 
 bool nimble_glue_dtm_rx_start(uint8_t channel, uint8_t phy) {
+    if(!ll_wait(LL_STATE_IDLE, 1000)) return false;
     struct ble_dtm_rx_params p = {
         .channel = channel,
         .phy = phy,
@@ -1277,12 +1310,58 @@ bool nimble_glue_dtm_rx_start(uint8_t channel, uint8_t phy) {
     return rc == 0;
 }
 
+/* Reset the controller once a test ends. The stock firmware re-initialized CPU2
+ * around every radio test; without a reset, advertising and connections resumed
+ * on a link layer the test had used, and CPU2 hard-faulted now and then
+ * afterwards ("ST(R) Copro(R) HardFault", KNOW-815). NimBLE sends HCI_Reset and
+ * resyncs, and on_sync advertises again if Bluetooth is on. */
+static void test_end_reset(void) {
+    ble_hs_sched_reset(BLE_HS_ECONTROLLER);
+}
+
 bool nimble_glue_dtm_stop(uint16_t* out_packets) {
     uint16_t packets = 0;
     int rc = ble_dtm_stop(&packets);
     if(rc != 0) FURI_LOG_E(TAG, "DTM stop rc=%d", rc);
     if(out_packets) *out_packets = packets;
+    test_end_reset();
     return rc == 0;
+}
+
+/* ST vendor radio tests, measured on the HCILayer radio (TASK-809, KNOW-815).
+ * It implements ACI_HAL_SET_TX_POWER_LEVEL, ACI_HAL_TONE_START/STOP and
+ * ACI_HAL_READ_RSSI. It answers ACI_HAL_RX_START and ACI_HAL_READ_RAW_RSSI with
+ * Unknown Command, so continuous receive is a DTM receiver test instead, and
+ * ACI_HAL_READ_RSSI reads the level while it runs. Same calling rules as DTM. */
+#define ACI_HAL_SET_TX_POWER_LEVEL_OCF 0x000F
+#define ACI_HAL_TONE_START_OCF         0x0015
+#define ACI_HAL_TONE_STOP_OCF          0x0016
+#define ACI_HAL_READ_RSSI_OCF          0x0022
+
+bool nimble_glue_tone_start(uint8_t channel, uint8_t pa_level) {
+    if(!ll_wait(LL_STATE_IDLE, 1000)) return false;
+    uint8_t power[2] = {0 /* normal power mode */, pa_level};
+    uint8_t tone[2] = {channel, 0 /* no frequency offset */};
+    int rc = ble_hs_hci_send_vs_cmd(ACI_HAL_SET_TX_POWER_LEVEL_OCF, power, 2, NULL, 0);
+    if(rc == 0) rc = ble_hs_hci_send_vs_cmd(ACI_HAL_TONE_START_OCF, tone, 2, NULL, 0);
+    if(rc != 0) FURI_LOG_E(TAG, "Tone start rc=%d", rc);
+    return rc == 0;
+}
+
+void nimble_glue_tone_stop(void) {
+    ble_hs_hci_send_vs_cmd(ACI_HAL_TONE_STOP_OCF, NULL, 0, NULL, 0);
+    test_end_reset();
+}
+
+bool nimble_glue_read_rssi(int8_t* dbm) {
+    /* Only while the receiver test is actually running. */
+    if(!ll_wait(LL_STATE_RX_TEST, 0)) return false;
+    uint8_t value = 0x7F;
+    int rc = ble_hs_hci_send_vs_cmd(ACI_HAL_READ_RSSI_OCF, NULL, 0, &value, 1);
+    /* 0x7F (127) is what the controller reports when nothing is receiving. */
+    if(rc != 0 || value == 0x7F) return false;
+    *dbm = (int8_t)value;
+    return true;
 }
 
 int nimble_glue_link_terminate(uint16_t conn_handle, uint8_t reason) {

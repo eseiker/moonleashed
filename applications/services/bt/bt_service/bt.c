@@ -477,6 +477,12 @@ static void bt_nimble_change_profile(Bt* bt, BtMessage* message) {
      * both. Like a stock profile change this drops links and re-advertises; a
      * HID-only profile changes nothing here, so the companion stays up. */
     ble_gatt_host_shim_commit();
+
+    /* Advertise again if Bluetooth is on, as the stock path does after
+     * furi_hal_bt_change_app. A radio test stops advertising before it runs
+     * and restores the default profile afterwards; without this the Flipper
+     * stayed invisible until a reboot (TASK-809). */
+    nimble_glue_set_advertising_enabled(bt->bt_settings.enabled);
 }
 
 static void bt_change_profile(Bt* bt, BtMessage* message) {

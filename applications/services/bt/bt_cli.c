@@ -37,11 +37,6 @@ static void bt_cli_radio_test_begin(void) {
 
 static void bt_cli_command_carrier_tx(PipeSide* pipe, FuriString* args, void* context) {
     UNUSED(context);
-    if(nimble_glue_is_synced()) {
-        printf("Carrier tests need the ST vendor commands, which this radio has not.\r\n");
-        printf("Use tx_packet / rx_packet, which run through Direct Test Mode.\r\n");
-        return;
-    }
     int channel = 0;
     int power = 0;
 
@@ -74,11 +69,6 @@ static void bt_cli_command_carrier_tx(PipeSide* pipe, FuriString* args, void* co
 
 static void bt_cli_command_carrier_rx(PipeSide* pipe, FuriString* args, void* context) {
     UNUSED(context);
-    if(nimble_glue_is_synced()) {
-        printf("Carrier tests need the ST vendor commands, which this radio has not.\r\n");
-        printf("Use tx_packet / rx_packet, which run through Direct Test Mode.\r\n");
-        return;
-    }
     int channel = 0;
 
     do {
@@ -178,15 +168,10 @@ static void bt_cli_command_packet_rx(PipeSide* pipe, FuriString* args, void* con
         printf("Press CTRL+C to stop\r\n");
         furi_hal_bt_start_packet_rx(channel, datarate);
 
-        /* No live RSSI under Direct Test Mode: reading it was an ST vendor
-         * command, so printing it would only ever show 0.0 (TASK-704). */
-        bool show_rssi = !nimble_glue_is_synced();
         while(!cli_is_pipe_broken_or_is_etx_next_char(pipe)) {
             furi_delay_ms(250);
-            if(show_rssi) {
-                printf("RSSI: %03.1f dB\r", (double)furi_hal_bt_get_rssi());
-                fflush(stdout);
-            }
+            printf("RSSI: %03.1f dB\r", (double)furi_hal_bt_get_rssi());
+            fflush(stdout);
         }
         uint16_t packets_received = furi_hal_bt_stop_packet_test();
         printf("Received %hu packets", packets_received);

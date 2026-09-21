@@ -233,9 +233,9 @@ bool furi_hal_bt_is_gatt_gap_supported(void) {
 }
 
 bool furi_hal_bt_is_testing_supported(void) {
-    /* The resident NimBLE host runs the packet tests through Direct Test Mode,
-     * which is standard HCI and works on the HCILayer radio (TASK-704). The
-     * carrier tests stay unavailable there; they were ST vendor commands. */
+    /* The resident NimBLE host runs the radio tests on the HCILayer radio:
+     * packet tests through Direct Test Mode (TASK-704), the carrier tone and
+     * RSSI through the vendor commands that radio implements (TASK-809). */
     if(nimble_glue_is_synced()) {
         return true;
     }
@@ -443,25 +443,22 @@ bool furi_hal_bt_is_alive(void) {
     return ble_glue_is_alive();
 }
 
-/* Radio test tools (TASK-696).
+/* Radio test tools (TASK-696, TASK-809).
  *
- * These drove CPU2 directly: the tone and RSSI entry points are ST vendor ACI
- * commands, which the HCILayer radio does not implement, and the packet test
- * entry points are standard HCI commands that would have to share the HCI
- * transport the resident NimBLE host owns. Neither is safe here, so they report
- * nothing rather than issuing commands.
+ * These drove CPU2 directly through ST's HCI transport, which the resident
+ * NimBLE host now owns, so they go through the host instead. Measured on the
+ * HCILayer radio (KNOW-815): the carrier tone and ACI_HAL_READ_RSSI exist;
+ * ACI_HAL_RX_START and ACI_HAL_READ_RAW_RSSI do not. Continuous receive is
+ * therefore a DTM receiver test, and the level comes from ACI_HAL_READ_RSSI
+ * while it runs. Without the NimBLE host there is no transport, so they do
+ * nothing.
  */
-static void furi_hal_bt_no_radio_test(const char* what) {
-    FURI_LOG_E(TAG, "%s is not available on the HCILayer radio", what);
-}
-
 void furi_hal_bt_start_tone_tx(uint8_t channel, uint8_t power) {
-    UNUSED(channel);
-    UNUSED(power);
-    furi_hal_bt_no_radio_test("tone TX");
+    if(nimble_glue_is_synced()) nimble_glue_tone_start(channel, power);
 }
 
 void furi_hal_bt_stop_tone_tx(void) {
+    if(nimble_glue_is_synced()) nimble_glue_tone_stop();
 }
 
 /* Packet tests are standard HCI LE test commands, so NimBLE's Direct Test Mode
@@ -471,20 +468,12 @@ static uint16_t furi_hal_bt_dtm_packets;
 
 void furi_hal_bt_start_packet_tx(uint8_t channel, uint8_t pattern, uint8_t datarate) {
     furi_hal_bt_dtm_packets = 0;
-    if(nimble_glue_is_synced()) {
-        nimble_glue_dtm_tx_start(channel, pattern, datarate);
-        return;
-    }
-    furi_hal_bt_no_radio_test("packet TX");
+    if(nimble_glue_is_synced()) nimble_glue_dtm_tx_start(channel, pattern, datarate);
 }
 
 void furi_hal_bt_start_packet_rx(uint8_t channel, uint8_t datarate) {
     furi_hal_bt_dtm_packets = 0;
-    if(nimble_glue_is_synced()) {
-        nimble_glue_dtm_rx_start(channel, datarate);
-        return;
-    }
-    furi_hal_bt_no_radio_test("packet RX");
+    if(nimble_glue_is_synced()) nimble_glue_dtm_rx_start(channel, datarate);
 }
 
 uint16_t furi_hal_bt_stop_packet_test(void) {
@@ -496,15 +485,12 @@ uint16_t furi_hal_bt_stop_packet_test(void) {
 }
 
 void furi_hal_bt_start_rx(uint8_t channel) {
-    UNUSED(channel);
-    /* A continuous receive with no packet counting was an ST vendor command. */
-    furi_hal_bt_no_radio_test("continuous RX");
+    furi_hal_bt_start_packet_rx(channel, 1);
 }
 
 float furi_hal_bt_get_rssi(void) {
-    /* The raw radio RSSI during a test was an ST vendor command. The standard
-     * alternative, ble_gap_conn_rssi, needs a live connection, which a radio
-     * test does not have. */
+    int8_t dbm;
+    if(nimble_glue_is_synced() && nimble_glue_read_rssi(&dbm)) return dbm;
     return 0.0f;
 }
 
@@ -513,8 +499,8 @@ uint32_t furi_hal_bt_get_transmitted_packets(void) {
 }
 
 void furi_hal_bt_stop_rx(void) {
+    furi_hal_bt_stop_packet_test();
 }
-
 bool furi_hal_bt_ensure_c2_mode(BleGlueC2Mode mode) {
     BleGlueCommandResult fw_start_res = ble_glue_force_c2_mode(mode);
     if(fw_start_res == BleGlueCommandResultOK) {
