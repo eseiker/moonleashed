@@ -816,12 +816,22 @@ int32_t tailcat_l2cap_app(void* context) {
 
     CliVcp* cli = furi_record_open(RECORD_CLI_VCP);
     FuriHalUsbInterface* previous = furi_hal_usb_get_config();
-    /* Firmware that already runs two CDC ports by default: just claim
-     * interface 1, no USB re-enumeration, so the CLI command that launched us
-     * completes normally. Older firmware (single CDC): switch as before. */
+    /* The second port only exists while an app needs it, so claiming it means
+     * re-enumerating USB. That drops the host's CLI connection, and a host that
+     * launched this app with `loader open` would otherwise lose the reply
+     * mid-flight and read it as a failed launch (KNOW-659). The loader prints
+     * its reply only once this app is running, so wait a second before
+     * claiming the port: the host then reads a finished command, and sees the
+     * port go away and come back instead of a connection dying mid-sentence.
+     * 300 ms was not enough, and the reply arrived empty. */
     bool reconfigure = previous != &usb_cdc_dual;
     bool usb_ok = true;
     if(reconfigure) {
+        /* Only wait, never toggle the CLI here: cli_vcp_enable selects
+         * usb_cdc_single, so disabling it first and enabling it after would put
+         * the single-port config straight back and the second port would never
+         * appear. Enabling an already-enabled CLI is a no-op. */
+        furi_delay_ms(1000);
         furi_hal_usb_unlock();
         usb_ok = furi_hal_usb_set_config(&usb_cdc_dual, NULL);
         if(usb_ok) cli_vcp_enable(cli);

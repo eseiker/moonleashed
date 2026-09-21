@@ -169,13 +169,14 @@ static void cli_vcp_message_received(FuriEventLoopObject* object, void* context)
         cli_vcp->is_enabled = true;
 
         // switch usb mode
-        // The default is two CDC ports: the CLI keeps interface 0 (same
-        // VID/PID and first port as before) and interface 1 stays idle for
-        // apps such as the Tailcat bridges and the USB-UART bridge. An app
-        // that claims interface 1 then needs no reconfiguration, so the host
-        // never sees the CLI port re-enumerate under a running command.
+        // One CDC port by default. Running two of them permanently showed the
+        // host a second serial port it cannot tell from the first: a picker
+        // labels both from the device's product string, and neither Chrome nor
+        // Firefox reads the interface names that would separate them
+        // (KNOW-807). An app that needs the second port switches to
+        // usb_cdc_dual itself and hands the CLI back afterwards.
         cli_vcp->previous_interface = furi_hal_usb_get_config();
-        furi_hal_usb_set_config(&usb_cdc_dual, NULL);
+        furi_hal_usb_set_config(&usb_cdc_single, NULL);
         furi_hal_cdc_set_callbacks(VCP_IF_NUM, &cdc_callbacks, cli_vcp);
         break;
 
