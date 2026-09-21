@@ -327,6 +327,9 @@ void subghz_protocol_decoder_nice_flor_s_set_skip_o_code(void* context, bool ski
  */
 uint64_t subghz_protocol_nice_flor_s_decrypt_ic(uint64_t data, uint16_t ic, const char* file_name);
 
+/** Reset the Faac SLH programming-mode state. */
+void faac_slh_reset_prog_mode(void);
+
 #ifdef __cplusplus
 }
 #endif

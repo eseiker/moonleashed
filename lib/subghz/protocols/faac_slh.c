@@ -1,4 +1,5 @@
 #include "faac_slh.h"
+#include "public_api.h"
 #include "../subghz_keystore.h"
 #include <m-array.h>
 #include "keeloq_common.h"
