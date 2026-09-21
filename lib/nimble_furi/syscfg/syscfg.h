@@ -7,6 +7,11 @@
 #define MYNEWT_VAL_BLE_WHITELIST       (0)
 #define MYNEWT_VAL_BLE_HCI_VS          (1)
 
+/* NimBLE adds COC_MAX_NUM to the channel pool itself. Two receive buffers per
+ * channel: l2cap_coc.c sizes its pool for them. */
+#define MYNEWT_VAL_BLE_L2CAP_COC_MAX_NUM        (2)
+#define MYNEWT_VAL_BLE_L2CAP_COC_SDU_BUFF_COUNT (2)
+
 #define MYNEWT_VAL_BLE_ATT_SVR_READ_MULT    (0)
 #define MYNEWT_VAL_BLE_ATT_SVR_SIGNED_WRITE (0)
 
