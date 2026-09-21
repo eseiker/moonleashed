@@ -16,6 +16,7 @@ The previous line of development (v1) is kept on the [`v1/main`](../../tree/v1/m
 
 - **Moonleashed branding.** The firmware reports itself as Moonleashed, with no Unleashed update slideshow or About screens.
 - **Sub-GHz runs from the SD card.** The app is `/ext/apps/Sub-GHz/subghz.fap`; the protocol library stays in firmware for Sub-GHz Remote, the CLI and other apps.
+- **Level-up animations on the SD card.** They ship in the SD dolphin pack instead of firmware.
 
 Everything else follows upstream Unleashed. See its README and changelog for features.
 
