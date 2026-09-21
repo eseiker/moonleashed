@@ -95,6 +95,14 @@ upstream_sources = [
 
 furi_sources = libenv.GlobRecursive("*.c", "nimble_furi")
 
+# Upstream's internal CoC functions clash with the public furi_ble/l2cap_coc.h.
+upstreamenv.Append(
+    CPPDEFINES=[
+        ("ble_l2cap_coc_init", "nmbl_l2cap_coc_init"),
+        ("ble_l2cap_coc_send", "nmbl_l2cap_coc_send"),
+    ],
+)
+
 # P-256 runs on the PKA (nimble_furi/glue/sm_alg_pka.c). Renaming upstream's
 # mbedtls versions here, in their definitions only, leaves them uncalled. They
 # still reference mbedtls ECDH, which is not built: only --gc-sections lets the
