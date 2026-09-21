@@ -22,6 +22,16 @@ static void bt_cli_command_hci_info(PipeSide* pipe, FuriString* args, void* cont
     furi_string_free(buffer);
 }
 
+// A reinit would take the controller away from NimBLE; the test only needs
+// the radio idle. bt_profile_restore_default brings advertising back.
+static void bt_cli_radio_test_begin(void) {
+    if(nimble_glue_is_started()) {
+        furi_hal_bt_stop_advertising();
+    } else {
+        furi_hal_bt_reinit();
+    }
+}
+
 static void bt_cli_command_carrier_tx(PipeSide* pipe, FuriString* args, void* context) {
     UNUSED(context);
     int channel = 0;
@@ -39,7 +49,7 @@ static void bt_cli_command_carrier_tx(PipeSide* pipe, FuriString* args, void* co
 
         Bt* bt = furi_record_open(RECORD_BT);
         bt_disconnect(bt);
-        furi_hal_bt_reinit();
+        bt_cli_radio_test_begin();
         printf("Transmitting carrier at %d channel at %d dB power\r\n", channel, power);
         printf("Press CTRL+C to stop\r\n");
         furi_hal_bt_start_tone_tx(channel, 0x19 + power);
@@ -66,7 +76,7 @@ static void bt_cli_command_carrier_rx(PipeSide* pipe, FuriString* args, void* co
 
         Bt* bt = furi_record_open(RECORD_BT);
         bt_disconnect(bt);
-        furi_hal_bt_reinit();
+        bt_cli_radio_test_begin();
         printf("Receiving carrier at %d channel\r\n", channel);
         printf("Press CTRL+C to stop\r\n");
 
@@ -113,7 +123,7 @@ static void bt_cli_command_packet_tx(PipeSide* pipe, FuriString* args, void* con
 
         Bt* bt = furi_record_open(RECORD_BT);
         bt_disconnect(bt);
-        furi_hal_bt_reinit();
+        bt_cli_radio_test_begin();
         printf(
             "Transmitting %d pattern packet at %d channel at %d M datarate\r\n",
             pattern,
@@ -150,7 +160,7 @@ static void bt_cli_command_packet_rx(PipeSide* pipe, FuriString* args, void* con
 
         Bt* bt = furi_record_open(RECORD_BT);
         bt_disconnect(bt);
-        furi_hal_bt_reinit();
+        bt_cli_radio_test_begin();
         printf("Receiving packets at %d channel at %d M datarate\r\n", channel, datarate);
         printf("Press CTRL+C to stop\r\n");
         furi_hal_bt_start_packet_rx(channel, datarate);

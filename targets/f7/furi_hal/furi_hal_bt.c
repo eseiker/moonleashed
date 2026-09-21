@@ -146,7 +146,7 @@ bool furi_hal_bt_is_gatt_gap_supported(void) {
 }
 
 bool furi_hal_bt_is_testing_supported(void) {
-    if(furi_hal_bt.stack == FuriHalBtStackFull) {
+    if(nimble_glue_is_started() || furi_hal_bt.stack == FuriHalBtStackFull) {
         return true;
     } else {
         return false;
@@ -371,34 +371,67 @@ bool furi_hal_bt_is_alive(void) {
     return ble_glue_is_alive();
 }
 
+// NimBLE owns the controller: tests go through the host. The HCILayer radio
+// has no ACI_HAL_RX_START or raw RSSI, so continuous receive is a DTM RX test
+// and the level comes from ACI_HAL_READ_RSSI while it runs.
+static uint32_t furi_hal_bt_dtm_tx_packets;
+
 void furi_hal_bt_start_tone_tx(uint8_t channel, uint8_t power) {
+    if(nimble_glue_is_started()) {
+        nimble_glue_tone_start(channel, power);
+        return;
+    }
     aci_hal_set_tx_power_level(0, power);
     aci_hal_tone_start(channel, 0);
 }
 
 void furi_hal_bt_stop_tone_tx(void) {
+    if(nimble_glue_is_started()) {
+        nimble_glue_tone_stop();
+        return;
+    }
     aci_hal_tone_stop();
 }
 
 void furi_hal_bt_start_packet_tx(uint8_t channel, uint8_t pattern, uint8_t datarate) {
+    if(nimble_glue_is_started()) {
+        nimble_glue_dtm_tx_start(channel, pattern, datarate);
+        return;
+    }
     hci_le_enhanced_transmitter_test(channel, 0x25, pattern, datarate);
 }
 
 void furi_hal_bt_start_packet_rx(uint8_t channel, uint8_t datarate) {
+    if(nimble_glue_is_started()) {
+        nimble_glue_dtm_rx_start(channel, datarate);
+        return;
+    }
     hci_le_enhanced_receiver_test(channel, datarate, 0);
 }
 
 uint16_t furi_hal_bt_stop_packet_test(void) {
     uint16_t num_of_packets = 0;
+    if(nimble_glue_is_started()) {
+        nimble_glue_dtm_stop(&num_of_packets, &furi_hal_bt_dtm_tx_packets);
+        return num_of_packets;
+    }
     hci_le_test_end(&num_of_packets);
     return num_of_packets;
 }
 
 void furi_hal_bt_start_rx(uint8_t channel) {
+    if(nimble_glue_is_started()) {
+        furi_hal_bt_start_packet_rx(channel, 1);
+        return;
+    }
     aci_hal_rx_start(channel);
 }
 
 float furi_hal_bt_get_rssi(void) {
+    if(nimble_glue_is_started()) {
+        int8_t dbm;
+        return nimble_glue_read_rssi(&dbm) ? dbm : 0.0f;
+    }
     float val;
     uint8_t rssi_raw[3];
 
@@ -423,12 +456,17 @@ float furi_hal_bt_get_rssi(void) {
 }
 
 uint32_t furi_hal_bt_get_transmitted_packets(void) {
+    if(nimble_glue_is_started()) return furi_hal_bt_dtm_tx_packets;
     uint32_t packets = 0;
     aci_hal_le_tx_test_packet_number(&packets);
     return packets;
 }
 
 void furi_hal_bt_stop_rx(void) {
+    if(nimble_glue_is_started()) {
+        furi_hal_bt_stop_packet_test();
+        return;
+    }
     aci_hal_rx_stop();
 }
 
