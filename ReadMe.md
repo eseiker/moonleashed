@@ -20,6 +20,7 @@ The previous line of development (v1) is kept on the [`v1/main`](../../tree/v1/m
 - **Bluetooth runs on the NimBLE host.** Update packages install ST's BLE HCILayer radio (link layer only), and NimBLE on the main core is the BLE host: the companion app, pairing with a PIN, battery and device information. Bonds made on stock firmware are not carried over; pair once.
 - **BLE apps work on NimBLE.** BLE Remote and Bad USB over BLE run unmodified. The Flipper advertises as a keyboard only while such an app runs.
 - **Apps can add their own GATT services** through the stock `ble_gatt_*` API; they go live on NimBLE when the app's profile starts.
+- **LE Secure Connections**, with the elliptic-curve work on the chip's PKA accelerator (`bt pka_test` checks it).
 
 Everything else follows upstream Unleashed. See its README and changelog for features.
 

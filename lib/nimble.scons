@@ -76,7 +76,6 @@ upstream_sources = [
     "nimble/nimble/host/src/ble_l2cap_sig.c",
     "nimble/nimble/host/src/ble_l2cap_sig_cmd.c",
     "nimble/nimble/host/src/ble_sm.c",
-    "nimble/nimble/host/src/ble_sm_alg.c",
     "nimble/nimble/host/src/ble_sm_cmd.c",
     "nimble/nimble/host/src/ble_sm_lgcy.c",
     "nimble/nimble/host/src/ble_sm_sc.c",
@@ -96,8 +95,22 @@ upstream_sources = [
 
 furi_sources = libenv.GlobRecursive("*.c", "nimble_furi")
 
+# P-256 runs on the PKA (nimble_furi/glue/sm_alg_pka.c). Renaming upstream's
+# mbedtls versions here, in their definitions only, leaves them uncalled. They
+# still reference mbedtls ECDH, which is not built: only --gc-sections lets the
+# link succeed, so nothing may call nmbl_mbedtls_*.
+sm_alg_obj = upstreamenv.Object(
+    "nimble/nimble/host/src/ble_sm_alg.c",
+    CPPDEFINES=list(upstreamenv["CPPDEFINES"])
+    + [
+        ("ble_sm_alg_gen_key_pair", "nmbl_mbedtls_gen_key_pair"),
+        ("ble_sm_alg_gen_dhkey", "nmbl_mbedtls_gen_dhkey"),
+    ],
+)
+
 lib = libenv.StaticLibrary(
-    "${FW_LIB_NAME}", upstreamenv.Object(upstream_sources) + libenv.Object(furi_sources)
+    "${FW_LIB_NAME}",
+    upstreamenv.Object(upstream_sources) + libenv.Object(furi_sources) + sm_alg_obj,
 )
 libenv.Install("${LIB_DIST_DIR}", lib)
 Return("lib")
