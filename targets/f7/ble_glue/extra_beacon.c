@@ -1,4 +1,5 @@
 #include "extra_beacon.h"
+#include <nimble_glue.h>
 #include "gap.h"
 
 #include <ble/ble.h>
@@ -30,6 +31,8 @@ void gap_extra_beacon_init(void) {
             extra_beacon.extra_beacon_data, extra_beacon.extra_beacon_data_len);
         if(extra_beacon.extra_beacon_state == GapExtraBeaconStateStarted) {
             extra_beacon.extra_beacon_state = GapExtraBeaconStateStopped;
+            // A radio reset ends ST's beacon, not NimBLE's
+            nimble_glue_beacon_stop();
             gap_extra_beacon_set_config(&extra_beacon.last_config);
         }
 
@@ -43,6 +46,14 @@ void gap_extra_beacon_init(void) {
     }
 }
 
+// NimBLE starts the beacon later, on its host thread, and that can fail
+static void gap_extra_beacon_sync_nimble(void) {
+    if(extra_beacon.extra_beacon_state == GapExtraBeaconStateStarted && nimble_glue_is_started() &&
+       !nimble_glue_beacon_is_wanted()) {
+        extra_beacon.extra_beacon_state = GapExtraBeaconStateStopped;
+    }
+}
+
 bool gap_extra_beacon_set_config(const GapExtraBeaconConfig* config) {
     furi_check(extra_beacon.state_mutex);
     furi_check(config);
@@ -50,6 +61,7 @@ bool gap_extra_beacon_set_config(const GapExtraBeaconConfig* config) {
     furi_check(config->min_adv_interval_ms <= config->max_adv_interval_ms);
     furi_check(config->min_adv_interval_ms >= GAP_MIN_ADV_INTERVAL_MS);
 
+    gap_extra_beacon_sync_nimble();
     if(extra_beacon.extra_beacon_state != GapExtraBeaconStateStopped) {
         return false;
     }
@@ -67,27 +79,45 @@ bool gap_extra_beacon_start(void) {
     furi_check(extra_beacon.state_mutex);
     furi_check(extra_beacon.last_config.min_adv_interval_ms >= GAP_MIN_ADV_INTERVAL_MS);
 
+    gap_extra_beacon_sync_nimble();
     if(extra_beacon.extra_beacon_state != GapExtraBeaconStateStopped) {
         return false;
     }
-    // Without the stock GAP there is no CPU2 host to run the beacon
-    if(gap_get_state() == GapStateUninitialized) {
+    // Without NimBLE or the stock GAP nothing runs the beacon
+    if(!nimble_glue_is_started() && gap_get_state() == GapStateUninitialized) {
         return false;
     }
 
     FURI_LOG_I(TAG, "Starting");
     furi_mutex_acquire(extra_beacon.state_mutex, FuriWaitForever);
     const GapExtraBeaconConfig* config = &extra_beacon.last_config;
-    tBleStatus status = aci_gap_additional_beacon_start(
-        GAP_MS_TO_SCAN_INTERVAL(config->min_adv_interval_ms),
-        GAP_MS_TO_SCAN_INTERVAL(config->max_adv_interval_ms),
-        (uint8_t)config->adv_channel_map,
-        config->address_type,
-        config->address,
-        (uint8_t)config->adv_power_level);
-    if(status) {
-        FURI_LOG_E(TAG, "Failed to start: 0x%x", status);
-        return false;
+    if(nimble_glue_is_started()) {
+        // The additional beacon was a CPU2 host feature; NimBLE runs it instead
+        if(!nimble_glue_beacon_start(
+               extra_beacon.extra_beacon_data,
+               extra_beacon.extra_beacon_data_len,
+               config->min_adv_interval_ms,
+               config->max_adv_interval_ms,
+               config->adv_channel_map,
+               config->address_type == GapAddressTypePublic,
+               config->address)) {
+            FURI_LOG_E(TAG, "Failed to start");
+            furi_mutex_release(extra_beacon.state_mutex);
+            return false;
+        }
+    } else {
+        tBleStatus status = aci_gap_additional_beacon_start(
+            GAP_MS_TO_SCAN_INTERVAL(config->min_adv_interval_ms),
+            GAP_MS_TO_SCAN_INTERVAL(config->max_adv_interval_ms),
+            (uint8_t)config->adv_channel_map,
+            config->address_type,
+            config->address,
+            (uint8_t)config->adv_power_level);
+        if(status) {
+            FURI_LOG_E(TAG, "Failed to start: 0x%x", status);
+            furi_mutex_release(extra_beacon.state_mutex);
+            return false;
+        }
     }
     extra_beacon.extra_beacon_state = GapExtraBeaconStateStarted;
     gap_emit_ble_beacon_status_event(true);
@@ -105,10 +135,15 @@ bool gap_extra_beacon_stop(void) {
 
     FURI_LOG_I(TAG, "Stopping");
     furi_mutex_acquire(extra_beacon.state_mutex, FuriWaitForever);
-    tBleStatus status = aci_gap_additional_beacon_stop();
-    if(status) {
-        FURI_LOG_E(TAG, "Failed to stop: 0x%x", status);
-        return false;
+    if(nimble_glue_is_started()) {
+        nimble_glue_beacon_stop();
+    } else {
+        tBleStatus status = aci_gap_additional_beacon_stop();
+        if(status) {
+            FURI_LOG_E(TAG, "Failed to stop: 0x%x", status);
+            furi_mutex_release(extra_beacon.state_mutex);
+            return false;
+        }
     }
     extra_beacon.extra_beacon_state = GapExtraBeaconStateStopped;
     gap_emit_ble_beacon_status_event(false);
@@ -121,7 +156,7 @@ bool gap_extra_beacon_set_data(const uint8_t* data, uint8_t length) {
     furi_check(extra_beacon.state_mutex);
     furi_check(data);
     furi_check(length <= EXTRA_BEACON_MAX_DATA_SIZE);
-    if(gap_get_state() == GapStateUninitialized) {
+    if(!nimble_glue_is_started() && gap_get_state() == GapStateUninitialized) {
         return false;
     }
 
@@ -131,10 +166,15 @@ bool gap_extra_beacon_set_data(const uint8_t* data, uint8_t length) {
     }
     extra_beacon.extra_beacon_data_len = length;
 
-    tBleStatus status = aci_gap_additional_beacon_set_data(length, data);
-    if(status) {
-        FURI_LOG_E(TAG, "Failed updating adv data: %d", status);
-        return false;
+    if(nimble_glue_is_started()) {
+        nimble_glue_beacon_set_data(data, length);
+    } else {
+        tBleStatus status = aci_gap_additional_beacon_set_data(length, data);
+        if(status) {
+            FURI_LOG_E(TAG, "Failed updating adv data: %d", status);
+            furi_mutex_release(extra_beacon.state_mutex);
+            return false;
+        }
     }
     furi_mutex_release(extra_beacon.state_mutex);
 
@@ -155,6 +195,7 @@ uint8_t gap_extra_beacon_get_data(uint8_t* data) {
 GapExtraBeaconState gap_extra_beacon_get_state(void) {
     furi_check(extra_beacon.state_mutex);
 
+    gap_extra_beacon_sync_nimble();
     return extra_beacon.extra_beacon_state;
 }
 

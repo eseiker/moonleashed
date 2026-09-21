@@ -67,6 +67,84 @@ static struct ble_npl_callout gatt_retry_callout;
 
 static int gap_event(struct ble_gap_event* event, void* arg);
 
+/* An app's extra beacon takes over the radio's one advertising set: the
+ * companion advertisement pauses and links stay up. Apps that spam beacons
+ * restart them every few tens of ms, which leaves no window to alternate. */
+static struct {
+    volatile bool wanted;
+    volatile bool restart; /* started again with a new config */
+    volatile bool data_dirty;
+    bool running; /* host thread */
+    /* Written by the app thread, read by the host: both under the critical section. */
+    uint8_t data[31];
+    uint8_t len;
+    uint16_t itvl_min, itvl_max;
+    uint8_t chan_map;
+    bool public_addr;
+    uint8_t addr[6];
+} beacon;
+static struct ble_npl_event beacon_event;
+
+static void beacon_set_data(void) {
+    /* Copy only under the critical section: set_data waits for the controller,
+     * and waiting with interrupts off hangs the device. */
+    uint8_t data[sizeof(beacon.data)];
+    FURI_CRITICAL_ENTER();
+    uint8_t len = beacon.len;
+    memcpy(data, beacon.data, len);
+    FURI_CRITICAL_EXIT();
+    ble_gap_adv_set_data(data, len);
+}
+
+/* Host thread. True while the beacon holds the advertising set. */
+static bool beacon_run(void) {
+    if(!beacon.wanted) return false;
+    if(beacon.running && !beacon.restart) {
+        if(beacon.data_dirty) {
+            beacon.data_dirty = false;
+            beacon_set_data();
+        }
+        return true;
+    }
+    if(beacon.running || glue.advertising) ble_gap_adv_stop();
+    glue.advertising = false;
+    beacon.running = false;
+    beacon.restart = false;
+    beacon.data_dirty = false;
+
+    struct ble_gap_adv_params p = {
+        .conn_mode = BLE_GAP_CONN_MODE_NON,
+        .disc_mode = BLE_GAP_DISC_MODE_NON,
+    };
+    uint8_t addr[6];
+    FURI_CRITICAL_ENTER();
+    p.itvl_min = beacon.itvl_min;
+    p.itvl_max = beacon.itvl_max;
+    p.channel_map = beacon.chan_map;
+    bool public_addr = beacon.public_addr;
+    memcpy(addr, beacon.addr, sizeof(addr));
+    FURI_CRITICAL_EXIT();
+
+    uint8_t own = BLE_OWN_ADDR_RANDOM;
+    if(public_addr) {
+        own = BLE_OWN_ADDR_PUBLIC;
+    } else if(ble_hs_id_set_rnd(addr) != 0) {
+        /* NimBLE takes static or non-resolvable random addresses only */
+        addr[5] |= 0xC0;
+        if(ble_hs_id_set_rnd(addr) != 0) own = glue.addr_type;
+    }
+    beacon_set_data();
+    int rc = ble_gap_adv_start(own, NULL, BLE_HS_FOREVER, &p, NULL, NULL);
+    if(rc != 0) {
+        /* Give the advertising set back to the companion. */
+        FURI_LOG_E(TAG, "Beacon start: %d", rc);
+        beacon.wanted = false;
+        return false;
+    }
+    beacon.running = true;
+    return true;
+}
+
 static void start_advertise(void) {
     struct ble_hs_adv_fields fields = {0};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
@@ -112,6 +190,7 @@ static void start_advertise(void) {
 }
 
 static void maybe_advertise(void) {
+    if(glue.synced && beacon_run()) return;
     if(!glue.synced || glue.adv_disabled || glue.advertising || glue.gatt_rebuilding) return;
     if(glue.conn_handle != BLE_HS_CONN_HANDLE_NONE) return;
     start_advertise();
@@ -245,6 +324,7 @@ static void on_reset(int reason) {
     FURI_LOG_W(TAG, "Controller reset, reason %d", reason);
     glue.synced = false;
     glue.advertising = false;
+    beacon.running = false;
 }
 
 static void adv_setting_event_fn(struct ble_npl_event* ev) {
@@ -315,6 +395,8 @@ static void gatt_rebuild_event_fn(struct ble_npl_event* ev) {
         return;
     }
     glue.gatt_rebuilding = true;
+    /* Waits for the beacon to stop: the table changes only with no GAP procedure */
+    if(beacon.wanted) return;
     if(glue.advertising) {
         ble_gap_adv_stop();
         glue.advertising = false;
@@ -361,6 +443,18 @@ static void post(struct ble_npl_event* ev) {
     if(glue.started) ble_npl_eventq_put(nimble_port_get_dflt_eventq(), ev);
 }
 
+static void beacon_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    if(!glue.synced) return; /* on_sync starts it */
+    if(!beacon.wanted && beacon.running) {
+        ble_gap_adv_stop();
+        beacon.running = false;
+    }
+    maybe_advertise();
+    /* A rebuild waits while the beacon is wanted. */
+    if(!beacon.wanted && (dyn_gatt_dirty() || glue.gatt_retry)) post(&gatt_rebuild_event);
+}
+
 static int32_t host_task(void* context) {
     UNUSED(context);
     nimble_port_run();
@@ -383,6 +477,7 @@ bool nimble_glue_start(void) {
     ble_npl_event_init(&gatt_rebuild_event, gatt_rebuild_event_fn, NULL);
     ble_npl_callout_init(
         &gatt_retry_callout, nimble_port_get_dflt_eventq(), gatt_rebuild_event_fn, NULL);
+    ble_npl_event_init(&beacon_event, beacon_event_fn, NULL);
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
@@ -470,6 +565,49 @@ bool nimble_glue_hid_input_report(uint8_t report_id, const uint8_t* data, uint16
 
 void nimble_glue_gatt_rebuild(void) {
     post(&gatt_rebuild_event);
+}
+
+bool nimble_glue_beacon_start(
+    const uint8_t* data,
+    uint8_t len,
+    uint16_t min_interval_ms,
+    uint16_t max_interval_ms,
+    uint8_t channel_map,
+    bool public_address,
+    const uint8_t address[6]) {
+    if(!glue.started || len > sizeof(beacon.data)) return false;
+    FURI_CRITICAL_ENTER();
+    memcpy(beacon.data, data, len);
+    beacon.len = len;
+    beacon.itvl_min = BLE_GAP_ADV_ITVL_MS(min_interval_ms);
+    beacon.itvl_max = BLE_GAP_ADV_ITVL_MS(max_interval_ms);
+    beacon.chan_map = channel_map;
+    beacon.public_addr = public_address;
+    memcpy(beacon.addr, address, sizeof(beacon.addr));
+    FURI_CRITICAL_EXIT();
+    beacon.restart = true;
+    beacon.wanted = true;
+    post(&beacon_event);
+    return true;
+}
+
+void nimble_glue_beacon_set_data(const uint8_t* data, uint8_t len) {
+    if(len > sizeof(beacon.data)) return;
+    FURI_CRITICAL_ENTER();
+    memcpy(beacon.data, data, len);
+    beacon.len = len;
+    FURI_CRITICAL_EXIT();
+    beacon.data_dirty = true;
+    if(beacon.wanted) post(&beacon_event);
+}
+
+bool nimble_glue_beacon_is_wanted(void) {
+    return beacon.wanted;
+}
+
+void nimble_glue_beacon_stop(void) {
+    beacon.wanted = false;
+    post(&beacon_event);
 }
 
 /* Radio tests. The caller stops advertising and drops the link first; those
