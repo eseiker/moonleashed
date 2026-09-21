@@ -70,6 +70,10 @@ bool gap_extra_beacon_start(void) {
     if(extra_beacon.extra_beacon_state != GapExtraBeaconStateStopped) {
         return false;
     }
+    // Without the stock GAP there is no CPU2 host to run the beacon
+    if(gap_get_state() == GapStateUninitialized) {
+        return false;
+    }
 
     FURI_LOG_I(TAG, "Starting");
     furi_mutex_acquire(extra_beacon.state_mutex, FuriWaitForever);
@@ -117,6 +121,9 @@ bool gap_extra_beacon_set_data(const uint8_t* data, uint8_t length) {
     furi_check(extra_beacon.state_mutex);
     furi_check(data);
     furi_check(length <= EXTRA_BEACON_MAX_DATA_SIZE);
+    if(gap_get_state() == GapStateUninitialized) {
+        return false;
+    }
 
     furi_mutex_acquire(extra_beacon.state_mutex, FuriWaitForever);
     if(data != extra_beacon.extra_beacon_data) {
