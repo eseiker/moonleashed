@@ -93,7 +93,17 @@ upstream_sources = [
     "nimble/porting/nimble/src/os_msys.c",
 ]
 
-furi_sources = libenv.GlobRecursive("*.c", "nimble_furi")
+furi_sources = [
+    src for src in libenv.GlobRecursive("*.c", "nimble_furi") if src.name != "l2cap_fixed.c"
+]
+
+# Only this file sees the private host headers: it adds channels the public API
+# cannot. Their stubbed-out inline functions leave parameters unused.
+fixed_cid_obj = libenv.Object(
+    "nimble_furi/glue/l2cap_fixed.c",
+    CPPPATH=list(libenv["CPPPATH"]) + ["#/lib/nimble/nimble/host/src"],
+    CCFLAGS=list(libenv["CCFLAGS"]) + ["-Wno-unused-parameter"],
+)
 
 # Upstream's internal CoC functions clash with the public furi_ble/l2cap_coc.h.
 upstreamenv.Append(
@@ -118,7 +128,8 @@ sm_alg_obj = upstreamenv.Object(
 
 lib = libenv.StaticLibrary(
     "${FW_LIB_NAME}",
-    upstreamenv.Object(upstream_sources) + libenv.Object(furi_sources) + sm_alg_obj,
+    upstreamenv.Object(upstream_sources) + libenv.Object(furi_sources) + fixed_cid_obj +
+        sm_alg_obj,
 )
 libenv.Install("${LIB_DIST_DIR}", lib)
 Return("lib")

@@ -26,6 +26,7 @@ The previous line of development (v1) is kept on the [`v1/main`](../../tree/v1/m
 - **Apps can connect as central** (`furi_ble_session`) while the companion keeps its link, and drop any link (`ble_link_disconnect`).
 - **Apps can use GATT as a client** (`ble_gatt_client_*`, Moon-compatible): discover, read, write and subscribe on a central link.
 - **Apps can open L2CAP channels** (`ble_l2cap_coc_*`, Moon-compatible) as client or server, with SDUs up to 2048 bytes.
+- **Apps can advertise their own payload** (`furi_ble_adv_*`), once or continuously, beside the companion's link, and **relay raw L2CAP frames on a fixed CID** (`ble_l2cap_fixed_*`).
 
 Everything else follows upstream Unleashed. See its README and changelog for features.
 
