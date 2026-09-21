@@ -1,4 +1,6 @@
 #include "gatt.h"
+#include "event_dispatcher.h"
+#include <gatt_host_shim.h>
 #include <ble/ble.h>
 
 #include <furi.h>
@@ -13,6 +15,82 @@
 #define ble_gatt_strict_crash(message)
 #endif
 
+#define SHIM_HANDLE_FIRST (0x0100)
+#define SHIM_REF_MAX      (8)
+
+static const BleGattHostShim* shim = NULL;
+static uint16_t shim_hid_handle;
+static uint16_t shim_next_handle = SHIM_HANDLE_FIRST;
+
+// Report Reference per characteristic handle, to tell HID reports apart
+static struct {
+    uint16_t handle;
+    uint16_t report_ref;
+} shim_refs[SHIM_REF_MAX];
+
+void ble_gatt_host_shim_set(const BleGattHostShim* new_shim) {
+    // Profile services register event handlers; gap_init normally sets this up
+    if(new_shim) ble_event_dispatcher_init();
+    shim = new_shim;
+}
+
+bool ble_gatt_host_shim_has_hid(void) {
+    return shim_hid_handle != 0;
+}
+
+static uint16_t shim_alloc_handle(void) {
+    uint16_t handle = shim_next_handle++;
+    if(shim_next_handle == 0) shim_next_handle = SHIM_HANDLE_FIRST;
+    return handle;
+}
+
+static void shim_ref_set(uint16_t handle, uint16_t report_ref) {
+    FURI_CRITICAL_ENTER();
+    for(size_t i = 0; i < SHIM_REF_MAX; i++) {
+        if(shim_refs[i].handle == 0) {
+            shim_refs[i].handle = handle;
+            shim_refs[i].report_ref = report_ref;
+            break;
+        }
+    }
+    FURI_CRITICAL_EXIT();
+}
+
+static uint16_t shim_ref_take(uint16_t handle, bool clear) {
+    uint16_t report_ref = 0;
+    FURI_CRITICAL_ENTER();
+    for(size_t i = 0; i < SHIM_REF_MAX; i++) {
+        if(shim_refs[i].handle == handle) {
+            report_ref = shim_refs[i].report_ref;
+            if(clear) shim_refs[i].handle = 0;
+            break;
+        }
+    }
+    FURI_CRITICAL_EXIT();
+    return report_ref;
+}
+
+static void shim_characteristic_init(
+    const BleGattCharacteristicParams* char_descriptor,
+    BleGattCharacteristicInstance* char_instance) {
+    char_instance->handle = shim_alloc_handle();
+    char_instance->descriptor_handle = 0;
+
+    const BleGattCharacteristicDescriptorParams* desc = char_descriptor->descriptor_params;
+    if(!desc) return;
+    char_instance->descriptor_handle = shim_alloc_handle();
+
+    // Read it now: the context is only valid while the profile starts
+    uint8_t const* data = NULL;
+    uint16_t len = 0;
+    bool release_data = desc->data_callback.fn(desc->data_callback.context, &data, &len);
+    if(desc->uuid_type == UUID_TYPE_16 &&
+       desc->uuid.Char_UUID_16 == REPORT_REFERENCE_DESCRIPTOR_UUID && data && len == 2) {
+        shim_ref_set(char_instance->handle, data[0] | (data[1] << 8));
+    }
+    if(release_data) free((void*)data);
+}
+
 void ble_gatt_characteristic_init(
     uint16_t svc_handle,
     const BleGattCharacteristicParams* char_descriptor,
@@ -26,6 +104,11 @@ void ble_gatt_characteristic_init(
         (void*)char_instance->characteristic,
         char_descriptor,
         sizeof(BleGattCharacteristicParams));
+
+    if(shim) {
+        shim_characteristic_init(char_descriptor, char_instance);
+        return;
+    }
 
     uint16_t char_data_size = 0;
     if(char_descriptor->data_prop_type == FlipperGattCharacteristicDataFixed) {
@@ -86,6 +169,12 @@ void ble_gatt_characteristic_init(
 void ble_gatt_characteristic_delete(
     uint16_t svc_handle,
     BleGattCharacteristicInstance* char_instance) {
+    if(shim) {
+        shim_ref_take(char_instance->handle, true);
+        free((void*)char_instance->characteristic);
+        return;
+    }
+
     tBleStatus status = aci_gatt_del_char(svc_handle, char_instance->handle);
     if(status) {
         FURI_LOG_E(
@@ -120,6 +209,21 @@ bool ble_gatt_characteristic_update(
         release_data = char_descriptor->data.callback.fn(context, &char_data, &char_data_size);
     }
 
+    if(shim) {
+        uint16_t uuid16 =
+            char_descriptor->uuid_type == UUID_TYPE_16 ? char_descriptor->uuid.Char_UUID_16 : 0;
+        shim->on_update(
+            uuid16,
+            shim_ref_take(char_instance->handle, false),
+            char_data,
+            char_data_size,
+            shim->context);
+        if(release_data) {
+            free((void*)char_data);
+        }
+        return false;
+    }
+
     tBleStatus result;
     size_t retries_left = 1000;
     do {
@@ -150,6 +254,15 @@ bool ble_gatt_service_add(
     uint8_t Service_Type,
     uint8_t Max_Attribute_Records,
     uint16_t* Service_Handle) {
+    if(shim) {
+        *Service_Handle = shim_alloc_handle();
+        if(Service_UUID_Type == UUID_TYPE_16 &&
+           Service_UUID->Service_UUID_16 == HUMAN_INTERFACE_DEVICE_SERVICE_UUID) {
+            shim_hid_handle = *Service_Handle;
+        }
+        return true;
+    }
+
     tBleStatus result = aci_gatt_add_service(
         Service_UUID_Type, Service_UUID, Service_Type, Max_Attribute_Records, Service_Handle);
     if(result) {
@@ -161,6 +274,11 @@ bool ble_gatt_service_add(
 }
 
 bool ble_gatt_service_delete(uint16_t svc_handle) {
+    if(shim) {
+        if(svc_handle == shim_hid_handle) shim_hid_handle = 0;
+        return true;
+    }
+
     tBleStatus result = aci_gatt_del_service(svc_handle);
     if(result) {
         FURI_LOG_E(TAG, "Failed to delete service: %x", result);

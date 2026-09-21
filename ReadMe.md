@@ -18,6 +18,7 @@ The previous line of development (v1) is kept on the [`v1/main`](../../tree/v1/m
 - **Sub-GHz runs from the SD card.** The app is `/ext/apps/Sub-GHz/subghz.fap`; the protocol library stays in firmware for Sub-GHz Remote, the CLI and other apps.
 - **Level-up animations on the SD card.** They ship in the SD dolphin pack instead of firmware.
 - **Bluetooth runs on the NimBLE host.** Update packages install ST's BLE HCILayer radio (link layer only), and NimBLE on the main core is the BLE host: the companion app, pairing with a PIN, battery and device information. Bonds made on stock firmware are not carried over; pair once.
+- **BLE apps work on NimBLE.** BLE Remote and Bad USB over BLE run unmodified. The Flipper advertises as a keyboard only while such an app runs.
 
 Everything else follows upstream Unleashed. See its README and changelog for features.
 

@@ -31,6 +31,12 @@ void nimble_glue_reload_bonds(void);
 void nimble_glue_set_battery_level(uint8_t level);
 void nimble_glue_set_power_state(bool charging);
 
+/* Show and advertise HID with the keyboard appearance, while a HID app runs. */
+void nimble_glue_set_hid_advertised(bool advertised);
+void nimble_glue_hid_set_report_map(const uint8_t* data, uint16_t len);
+/* See hid_gatt_input_report. */
+bool nimble_glue_hid_input_report(uint8_t report_id, const uint8_t* data, uint16_t len);
+
 #ifdef __cplusplus
 }
 #endif

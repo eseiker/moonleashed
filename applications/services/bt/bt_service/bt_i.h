@@ -93,6 +93,8 @@ struct Bt {
     // NimBLE host on CPU1, for radios without a CPU2 host
     bool nimble_active;
     bool nimble_pin_shown;
+    // current_profile was started by an app profile template
+    bool nimble_profile_started;
 };
 
 /** Open a new RPC connection
