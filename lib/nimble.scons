@@ -1,0 +1,103 @@
+Import("env")
+
+# lib/nimble is upstream, unmodified. Flipper-specific code lives in lib/nimble_furi.
+
+nimble_include_paths = [
+    # Must come first so our syscfg.h shadows upstream's.
+    "#/lib/nimble_furi",
+    "#/lib/nimble/nimble/include",
+    "#/lib/nimble/nimble/host/include",
+    "#/lib/nimble/nimble/host/util/include",
+    "#/lib/nimble/nimble/host/services/gap/include",
+    "#/lib/nimble/nimble/host/services/gatt/include",
+    "#/lib/nimble/nimble/host/store/config/include",
+    "#/lib/nimble/nimble/transport/include",
+    "#/lib/nimble/porting/nimble/include",
+    "#/lib/nimble_furi/npl/furi/include",
+    "#/lib/nimble_furi/glue",
+]
+
+# Glue headers include no NimBLE headers, so MYNEWT_VAL never meets -Wundef.
+env.Append(
+    CPPPATH=[
+        "#/lib/nimble_furi/glue",
+    ],
+)
+
+libenv = env.Clone(FW_LIB_NAME="nimble")
+libenv.ApplyLibFlags()
+libenv.AppendUnique(CPPPATH=nimble_include_paths)
+
+# Upstream is compiled with warnings off. Our port keeps them, except two that
+# upstream's headers trip.
+upstreamenv = libenv.Clone()
+upstreamenv.AppendUnique(CCFLAGS=["-w"])
+libenv.AppendUnique(CCFLAGS=["-Wno-undef", "-Wno-redundant-decls"])
+
+# Host only; the rest of the tree needs Mynewt.
+upstream_sources = [
+    "nimble/nimble/host/services/gap/src/ble_svc_gap.c",
+    "nimble/nimble/host/services/gatt/src/ble_svc_gatt.c",
+    "nimble/nimble/host/src/ble_att.c",
+    "nimble/nimble/host/src/ble_att_clt.c",
+    "nimble/nimble/host/src/ble_att_cmd.c",
+    "nimble/nimble/host/src/ble_att_svr.c",
+    "nimble/nimble/host/src/ble_cs.c",
+    "nimble/nimble/host/src/ble_dtm.c",
+    "nimble/nimble/host/src/ble_eatt.c",
+    "nimble/nimble/host/src/ble_eddystone.c",
+    "nimble/nimble/host/src/ble_gap.c",
+    "nimble/nimble/host/src/ble_gattc.c",
+    "nimble/nimble/host/src/ble_gatts.c",
+    "nimble/nimble/host/src/ble_hs.c",
+    "nimble/nimble/host/src/ble_hs_adv.c",
+    "nimble/nimble/host/src/ble_hs_atomic.c",
+    "nimble/nimble/host/src/ble_hs_cfg.c",
+    "nimble/nimble/host/src/ble_hs_conn.c",
+    "nimble/nimble/host/src/ble_hs_flow.c",
+    "nimble/nimble/host/src/ble_hs_hci.c",
+    "nimble/nimble/host/src/ble_hs_hci_cmd.c",
+    "nimble/nimble/host/src/ble_hs_hci_evt.c",
+    "nimble/nimble/host/src/ble_hs_hci_util.c",
+    "nimble/nimble/host/src/ble_hs_id.c",
+    "nimble/nimble/host/src/ble_hs_log.c",
+    "nimble/nimble/host/src/ble_hs_mbuf.c",
+    "nimble/nimble/host/src/ble_hs_misc.c",
+    "nimble/nimble/host/src/ble_hs_mqueue.c",
+    "nimble/nimble/host/src/ble_hs_periodic_sync.c",
+    "nimble/nimble/host/src/ble_hs_pvcy.c",
+    "nimble/nimble/host/src/ble_hs_shutdown.c",
+    "nimble/nimble/host/src/ble_hs_startup.c",
+    "nimble/nimble/host/src/ble_hs_stop.c",
+    "nimble/nimble/host/src/ble_ibeacon.c",
+    "nimble/nimble/host/src/ble_iso.c",
+    "nimble/nimble/host/src/ble_l2cap.c",
+    "nimble/nimble/host/src/ble_l2cap_coc.c",
+    "nimble/nimble/host/src/ble_l2cap_sig.c",
+    "nimble/nimble/host/src/ble_l2cap_sig_cmd.c",
+    "nimble/nimble/host/src/ble_sm.c",
+    "nimble/nimble/host/src/ble_sm_alg.c",
+    "nimble/nimble/host/src/ble_sm_cmd.c",
+    "nimble/nimble/host/src/ble_sm_lgcy.c",
+    "nimble/nimble/host/src/ble_sm_sc.c",
+    "nimble/nimble/host/src/ble_store.c",
+    "nimble/nimble/host/src/ble_store_util.c",
+    "nimble/nimble/host/src/ble_uuid.c",
+    "nimble/nimble/host/store/config/src/ble_store_config.c",
+    "nimble/nimble/host/util/src/addr.c",
+    "nimble/nimble/transport/src/transport.c",
+    "nimble/porting/nimble/src/endian.c",
+    "nimble/porting/nimble/src/mem.c",
+    "nimble/porting/nimble/src/nimble_port.c",
+    "nimble/porting/nimble/src/os_mbuf.c",
+    "nimble/porting/nimble/src/os_mempool.c",
+    "nimble/porting/nimble/src/os_msys.c",
+]
+
+furi_sources = libenv.GlobRecursive("*.c", "nimble_furi")
+
+lib = libenv.StaticLibrary(
+    "${FW_LIB_NAME}", upstreamenv.Object(upstream_sources) + libenv.Object(furi_sources)
+)
+libenv.Install("${LIB_DIST_DIR}", lib)
+Return("lib")

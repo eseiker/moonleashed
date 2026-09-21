@@ -36,3 +36,6 @@
 	path = applications/main/subghz_remote
 	url = https://github.com/DarkFlippers/SubGHz_Remote.git
 	branch = ufw_main_app
+[submodule "lib/nimble"]
+	path = lib/nimble
+	url = https://github.com/apache/mynewt-nimble.git

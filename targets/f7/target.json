@@ -19,6 +19,7 @@
     "sdk_symbols": "api_symbols.csv",
     "linker_dependencies": [
         "print",
+        "nimble",
         "flipper7",
         "furi",
         "freertos",

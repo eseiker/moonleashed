@@ -85,6 +85,16 @@ SECTIONS {
         _edata = .;        /* define a global symbol at data end */
     } >RAM1 AT> FLASH
 
+    /* NimBLE transport pools, ahead of the furi_hal_memory pool. */
+    .sram2b_pools (NOLOAD)   :
+    {
+        *(.bss.pool_acl_buf)
+        *(.bss.pool_evt_lo_buf)
+        *(.bss.pool_evt_buf)
+        *(.bss.pool_cmd_buf)
+        . = ALIGN(4);
+    } >RAM2B
+
     /* Uninitialized data section */
     . = ALIGN(4);
     .bss : {

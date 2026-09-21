@@ -57,7 +57,12 @@ void furi_hal_memory_init(void) {
     } else {
         memory->region[SRAM_A].size = 0;
     }
-    memory->region[SRAM_B].size = sram2b_unprotected_size;
+    uint32_t sram2b_busy_size = (uint32_t)&__sram2b_start__ - SRAM2B_BASE;
+    if(sram2b_unprotected_size > sram2b_busy_size) {
+        memory->region[SRAM_B].size = sram2b_unprotected_size - sram2b_busy_size;
+    } else {
+        memory->region[SRAM_B].size = 0;
+    }
 
     FURI_LOG_I(
         TAG, "SRAM2A: 0x%p, %lu", memory->region[SRAM_A].start, memory->region[SRAM_A].size);
