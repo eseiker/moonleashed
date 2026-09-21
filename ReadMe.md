@@ -15,6 +15,7 @@ The previous line of development (v1) is kept on the [`v1/main`](../../tree/v1/m
 ## What is different from Unleashed
 
 - **Moonleashed branding.** The firmware reports itself as Moonleashed, with no Unleashed update slideshow or About screens.
+- **Sub-GHz runs from the SD card.** The app is `/ext/apps/Sub-GHz/subghz.fap`; the protocol library stays in firmware for Sub-GHz Remote, the CLI and other apps.
 
 Everything else follows upstream Unleashed. See its README and changelog for features.
 
