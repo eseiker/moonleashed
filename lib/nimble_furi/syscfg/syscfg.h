@@ -11,6 +11,8 @@
  * channel: l2cap_coc.c sizes its pool for them. */
 #define MYNEWT_VAL_BLE_L2CAP_COC_MAX_NUM        (2)
 #define MYNEWT_VAL_BLE_L2CAP_COC_SDU_BUFF_COUNT (2)
+/* Per link ATT, SIG, SM and up to 4 fixed CIDs (l2cap_fixed.c) */
+#define MYNEWT_VAL_BLE_L2CAP_MAX_CHANS          (7 * MYNEWT_VAL_BLE_MAX_CONNECTIONS)
 
 #define MYNEWT_VAL_BLE_ATT_SVR_READ_MULT    (0)
 #define MYNEWT_VAL_BLE_ATT_SVR_SIGNED_WRITE (0)

@@ -1,5 +1,5 @@
 entry,status,name,type,params
-Version,+,88.15,,
+Version,+,88.16,,
 Header,+,applications/drivers/subghz/cc1101_ext/cc1101_ext_interconnect.h,,
 Header,+,applications/services/applications.h,,
 Header,+,applications/services/bt/bt_service/bt.h,,
@@ -284,11 +284,13 @@ Header,+,lib/toolbox/value_index.h,,
 Header,+,lib/toolbox/varint.h,,
 Header,+,lib/toolbox/version.h,,
 Header,+,lib/u8g2/u8g2_glue.h,,
+Header,+,targets/f7/ble_glue/furi_ble/adv.h,,
 Header,+,targets/f7/ble_glue/furi_ble/event_dispatcher.h,,
 Header,+,targets/f7/ble_glue/furi_ble/furi_ble_session.h,,
 Header,+,targets/f7/ble_glue/furi_ble/gatt.h,,
 Header,+,targets/f7/ble_glue/furi_ble/gatt_client.h,,
 Header,+,targets/f7/ble_glue/furi_ble/l2cap_coc.h,,
+Header,+,targets/f7/ble_glue/furi_ble/l2cap_fixed.h,,
 Header,+,targets/f7/ble_glue/furi_ble/link.h,,
 Header,+,targets/f7/ble_glue/furi_ble/profile_interface.h,,
 Header,+,targets/f7/ble_glue/profiles/serial_profile.h,,
@@ -851,6 +853,13 @@ Function,+,ble_l2cap_coc_init,void,
 Function,+,ble_l2cap_coc_listen,_Bool,"uint16_t, uint16_t"
 Function,+,ble_l2cap_coc_send,_Bool,"uint8_t, const uint8_t*, uint16_t"
 Function,+,ble_l2cap_coc_set_callback,void,"uint16_t, BleL2capCocCallback, void*"
+Function,+,ble_l2cap_fixed_deinit,void,
+Function,+,ble_l2cap_fixed_init,void,
+Function,+,ble_l2cap_fixed_register,_Bool,"uint16_t, uint16_t"
+Function,+,ble_l2cap_fixed_send,_Bool,"uint16_t, uint16_t, const uint8_t*, uint16_t"
+Function,+,ble_l2cap_fixed_set_callback,void,"BleL2capFixedCallback, void*"
+Function,+,ble_l2cap_fixed_set_link_callback,void,"BleL2capFixedLinkCallback, void*"
+Function,+,ble_l2cap_fixed_unregister,_Bool,uint16_t
 Function,+,ble_link_disconnect,BleLinkDisconnectStatus,"uint16_t, uint8_t"
 Function,-,ble_profile_hid_consumer_key_press,_Bool,"FuriHalBleProfileBase*, uint16_t"
 Function,-,ble_profile_hid_consumer_key_release,_Bool,"FuriHalBleProfileBase*, uint16_t"
@@ -1423,6 +1432,10 @@ Function,-,ftrylockfile,int,FILE*
 Function,-,funlockfile,void,FILE*
 Function,-,funopen,FILE*,"const void*, int (*)(void*, char*, int), int (*)(void*, const char*, int), fpos_t (*)(void*, fpos_t, int), int (*)(void*)"
 Function,-,furi_background,void,
+Function,+,furi_ble_adv_clear,void,
+Function,+,furi_ble_adv_restart,void,
+Function,+,furi_ble_adv_set,_Bool,"const uint8_t*, uint8_t, const uint8_t*, uint8_t"
+Function,+,furi_ble_adv_set_ex,_Bool,"const uint8_t*, uint8_t, const uint8_t*, uint8_t, _Bool"
 Function,+,furi_ble_session_alloc,FuriBleSession*,const FuriBleSessionConfig*
 Function,+,furi_ble_session_conn_handle,uint16_t,FuriBleSession*
 Function,+,furi_ble_session_free,void,FuriBleSession*

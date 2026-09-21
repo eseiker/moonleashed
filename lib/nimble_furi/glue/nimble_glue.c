@@ -16,6 +16,7 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
+#include <furi_ble/adv.h>
 #include <furi_ble/link.h>
 #include <loader/loader.h>
 
@@ -171,6 +172,102 @@ static bool beacon_run(void) {
     return true;
 }
 
+/* An app's raw advertisement replaces the companion's, also while the
+ * companion is connected. Links it brings in are the app's. */
+static struct {
+    volatile bool wanted;
+    volatile bool stop_on_connect;
+    volatile bool halted; /* a peer connected with stop_on_connect set */
+    uint8_t adv[31];
+    uint8_t adv_len;
+    uint8_t rsp[31];
+    uint8_t rsp_len;
+} raw_adv;
+
+static void maybe_advertise(void);
+
+static int raw_adv_gap_event(struct ble_gap_event* event, void* arg) {
+    UNUSED(arg);
+    switch(event->type) {
+    case BLE_GAP_EVENT_CONNECT:
+        glue.advertising = false;
+        if(event->connect.status == 0) {
+            if(raw_adv.stop_on_connect) raw_adv.halted = true;
+            // A bonded phone reconnects to any connectable advertisement
+            if(glue.conn_handle == BLE_HS_CONN_HANDLE_NONE) {
+                ble_gap_set_event_cb(event->connect.conn_handle, gap_event, NULL);
+                gap_event(event, NULL);
+            }
+        }
+        maybe_advertise();
+        break;
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        glue.advertising = false;
+        maybe_advertise();
+        break;
+    case BLE_GAP_EVENT_DISCONNECT:
+        if(glue.gatt_rebuilding) {
+            ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &gatt_rebuild_event);
+        } else {
+            maybe_advertise();
+        }
+        break;
+    case BLE_GAP_EVENT_SUBSCRIBE:
+        dyn_gatt_on_subscribe(
+            event->subscribe.conn_handle,
+            event->subscribe.attr_handle,
+            event->subscribe.cur_notify,
+            event->subscribe.cur_indicate);
+        break;
+    case BLE_GAP_EVENT_NOTIFY_TX:
+        dyn_gatt_on_notify_tx(
+            event->notify_tx.conn_handle,
+            event->notify_tx.attr_handle,
+            event->notify_tx.status,
+            event->notify_tx.indication);
+        break;
+    case BLE_GAP_EVENT_NOTIFY_RX:
+        gatt_client_on_notify(
+            event->notify_rx.conn_handle, event->notify_rx.attr_handle, event->notify_rx.om);
+        break;
+    case BLE_GAP_EVENT_REPEAT_PAIRING: {
+        struct ble_gap_conn_desc desc;
+        if(ble_gap_conn_find(event->repeat_pairing.conn_handle, &desc) == 0) {
+            ble_store_util_delete_peer(&desc.peer_id_addr);
+        }
+        return BLE_GAP_REPEAT_PAIRING_RETRY;
+    }
+    default:
+        break;
+    }
+    return 0;
+}
+
+static void start_raw_advertise(void) {
+    uint8_t adv[sizeof(raw_adv.adv)];
+    uint8_t rsp[sizeof(raw_adv.rsp)];
+    FURI_CRITICAL_ENTER();
+    uint8_t adv_len = raw_adv.adv_len;
+    uint8_t rsp_len = raw_adv.rsp_len;
+    memcpy(adv, raw_adv.adv, adv_len);
+    memcpy(rsp, raw_adv.rsp, rsp_len);
+    FURI_CRITICAL_EXIT();
+    ble_gap_adv_set_data(adv, adv_len);
+    ble_gap_adv_rsp_set_data(rsp, rsp_len);
+
+    struct ble_gap_adv_params params = {0};
+    params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    int rc =
+        ble_gap_adv_start(glue.addr_type, NULL, BLE_HS_FOREVER, &params, raw_adv_gap_event, NULL);
+    if(rc != 0) {
+        // ENOMEM just means both link slots are taken; it retries on a disconnect
+        if(rc != BLE_HS_ENOMEM) FURI_LOG_E(TAG, "Raw adv_start: %d", rc);
+        return;
+    }
+    glue.advertising = true;
+}
+
 static void start_advertise(void) {
     struct ble_hs_adv_fields fields = {0};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
@@ -219,6 +316,10 @@ static void maybe_advertise(void) {
     if(glue.synced && beacon_run()) return;
     if(!glue.synced || glue.adv_disabled || glue.advertising || glue.gatt_rebuilding) return;
     if(central.active) return;
+    if(raw_adv.wanted) {
+        if(!raw_adv.halted) start_raw_advertise();
+        return;
+    }
     if(glue.conn_handle != BLE_HS_CONN_HANDLE_NONE) return;
     start_advertise();
 }
@@ -559,6 +660,13 @@ static int register_services(void) {
     return rc;
 }
 
+// Counts a link only if its disconnect event is on the way
+static int terminate_link(uint16_t conn_handle, void* arg) {
+    int rc = ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+    if(rc == 0 || rc == BLE_HS_EALREADY) (*(int*)arg)++;
+    return 0;
+}
+
 /* NimBLE changes its table only with no link and no GAP procedure. The
  * built-in services register first, in boot order, so their handles and the
  * CCCDs bonded peers cached stay put. */
@@ -578,11 +686,10 @@ static void gatt_rebuild_event_fn(struct ble_npl_event* ev) {
         ble_gap_adv_stop();
         glue.advertising = false;
     }
-    if(glue.conn_handle != BLE_HS_CONN_HANDLE_NONE) {
-        /* Continues on the disconnect event. */
-        ble_gap_terminate(glue.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-        return;
-    }
+    // App links from raw advertising block the reset too; the last disconnect continues
+    int links = 0;
+    ble_gap_conn_foreach_handle(terminate_link, &links);
+    if(links) return;
 
     int rc = ble_gatts_reset();
     if(rc == 0) {
@@ -862,6 +969,43 @@ void nimble_glue_on_app_stop(void (*cleanup)(void)) {
     }
 }
 
+bool furi_ble_adv_set_ex(
+    const uint8_t* adv,
+    uint8_t adv_len,
+    const uint8_t* rsp,
+    uint8_t rsp_len,
+    bool stop_on_connect) {
+    if(adv_len > sizeof(raw_adv.adv) || rsp_len > sizeof(raw_adv.rsp)) return false;
+    if((adv_len && !adv) || (rsp_len && !rsp)) return false;
+    FURI_CRITICAL_ENTER();
+    if(adv_len) memcpy(raw_adv.adv, adv, adv_len);
+    raw_adv.adv_len = adv_len;
+    if(rsp_len) memcpy(raw_adv.rsp, rsp, rsp_len);
+    raw_adv.rsp_len = rsp_len;
+    FURI_CRITICAL_EXIT();
+    raw_adv.stop_on_connect = stop_on_connect;
+    raw_adv.halted = false;
+    raw_adv.wanted = true;
+    nimble_glue_on_app_stop(furi_ble_adv_clear);
+    post(&readvertise_event);
+    return true;
+}
+
+bool furi_ble_adv_set(const uint8_t* adv, uint8_t adv_len, const uint8_t* rsp, uint8_t rsp_len) {
+    return furi_ble_adv_set_ex(adv, adv_len, rsp, rsp_len, false);
+}
+
+void furi_ble_adv_restart(void) {
+    raw_adv.halted = false;
+    post(&readvertise_event);
+}
+
+void furi_ble_adv_clear(void) {
+    raw_adv.wanted = false;
+    raw_adv.halted = false;
+    post(&readvertise_event);
+}
+
 bool nimble_glue_central_start(const char* name, NimbleCentralCb cb, void* ctx) {
     if(!glue.synced || !name || !name[0] || strlen(name) >= sizeof(central.name)) return false;
     furi_mutex_acquire(central_mutex, FuriWaitForever);
@@ -894,10 +1038,8 @@ void nimble_glue_central_stop(void) {
 }
 
 BleLinkDisconnectStatus ble_link_disconnect(uint16_t conn_handle, uint8_t reason) {
-    if(conn_handle == BLE_HS_CONN_HANDLE_NONE ||
-       (conn_handle != glue.conn_handle && conn_handle != central.conn_handle)) {
-        return BleLinkDisconnectNotConnected;
-    }
+    // Raw advertising brings links of its own, so ask the host
+    if(ble_gap_conn_find(conn_handle, NULL) != 0) return BleLinkDisconnectNotConnected;
     bool queued = false;
     FURI_CRITICAL_ENTER();
     for(size_t i = 0; i < COUNT_OF(terminate_queue) && !queued; i++) {
