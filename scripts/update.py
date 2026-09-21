@@ -28,7 +28,7 @@ class Main(App):
     WHITELISTED_STACK_TYPES = set(
         map(
             get_stack_type,
-            ["BLE_FULL", "BLE_LIGHT", "BLE_BASIC"],
+            ["BLE_FULL", "BLE_LIGHT", "BLE_BASIC", "BLE_HCI"],
         )
     )
 

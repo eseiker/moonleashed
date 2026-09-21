@@ -1,0 +1,36 @@
+/* Plain-C interface to the NimBLE host. Includes no NimBLE headers. */
+
+#pragma once
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Start the host on an acquired controller. */
+bool nimble_glue_start(void);
+
+/* True once started: the HAL then routes to NimBLE, synced or not. */
+bool nimble_glue_is_started(void);
+bool nimble_glue_is_synced(void);
+bool nimble_glue_is_advertising(void);
+bool nimble_glue_is_connected(void);
+bool nimble_glue_is_pairing(void);
+/* Passkey to show while pairing. */
+uint32_t nimble_glue_passkey(void);
+
+/* The Bluetooth setting. Off stops advertising and drops the link. */
+void nimble_glue_set_advertising_enabled(bool enabled);
+void nimble_glue_disconnect(void);
+void nimble_glue_forget_bonds(void);
+/* Loads bonds.bin from a card that mounted after the start. */
+void nimble_glue_reload_bonds(void);
+
+void nimble_glue_set_battery_level(uint8_t level);
+void nimble_glue_set_power_state(bool charging);
+
+#ifdef __cplusplus
+}
+#endif

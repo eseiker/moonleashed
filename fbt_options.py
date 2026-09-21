@@ -19,17 +19,16 @@ DEBUG = 1
 DIST_SUFFIX = "local"
 
 # Coprocessor firmware
-COPRO_OB_DATA = "scripts/ob.data"
+COPRO_OB_DATA = "scripts/ob_custradio.data"
 
 # Must match lib/stm32wb_copro version
 COPRO_CUBE_VERSION = "1.20.0"
 
 COPRO_CUBE_DIR = "lib/stm32wb_copro"
 
-# Default radio stack
-COPRO_STACK_BIN = "stm32wb5x_BLE_Stack_light_fw.bin"
-# Firmware also supports "ble_full", but it might not fit into debug builds
-COPRO_STACK_TYPE = "ble_light"
+# Link layer only; the BLE host is NimBLE on CPU1
+COPRO_STACK_BIN = "stm32wb5x_BLE_HCILayer_fw.bin"
+COPRO_STACK_TYPE = "ble_hci"
 
 # Leave 0 to let scripts automatically calculate it
 COPRO_STACK_ADDR = "0x0"
