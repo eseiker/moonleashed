@@ -18,6 +18,7 @@
 #include "nimble_glue.h"
 #include "serial_gatt.h"
 #include "info_gatt.h"
+#include "hid_gatt.h"
 #include "bond_store.h"
 #include "msys_pool.h"
 
@@ -40,6 +41,7 @@ static struct {
     volatile bool advertising;
     volatile bool pairing;
     volatile bool adv_disabled;
+    volatile bool hid_advertised;
     volatile uint32_t passkey;
     volatile uint16_t conn_handle;
     uint8_t addr_type;
@@ -49,6 +51,7 @@ static struct ble_npl_event adv_setting_event;
 static struct ble_npl_event disconnect_event;
 static struct ble_npl_event forget_event;
 static struct ble_npl_event reload_event;
+static struct ble_npl_event readvertise_event;
 
 static int gap_event(struct ble_gap_event* event, void* arg);
 
@@ -56,10 +59,15 @@ static void start_advertise(void) {
     struct ble_hs_adv_fields fields = {0};
     fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
-    /* The stock serial profile advertises 0x3080 | hw_color. */
-    ble_uuid16_t uuid = BLE_UUID16_INIT(0x3080 | (uint16_t)furi_hal_version_get_hw_color());
-    fields.uuids16 = &uuid;
-    fields.num_uuids16 = 1;
+    /* The stock serial profile advertises 0x3080 | hw_color. A phone that sees
+     * HID runs its keyboard pairing flow, which the companion cannot answer, so
+     * HID is advertised only while a HID app runs. */
+    ble_uuid16_t uuids[2] = {
+        BLE_UUID16_INIT(0x3080 | (uint16_t)furi_hal_version_get_hw_color()),
+        BLE_UUID16_INIT(0x1812),
+    };
+    fields.uuids16 = uuids;
+    fields.num_uuids16 = glue.hid_advertised ? 2 : 1;
     fields.uuids16_is_complete = 1;
 
     const char* name = furi_hal_version_get_device_name_ptr();
@@ -76,7 +84,7 @@ static void start_advertise(void) {
     }
 
     struct ble_hs_adv_fields rsp = {0};
-    rsp.appearance = 0x8600;
+    rsp.appearance = glue.hid_advertised ? 0x03C1 /* keyboard */ : 0x8600;
     rsp.appearance_is_present = 1;
     ble_gap_adv_rsp_set_fields(&rsp);
 
@@ -119,6 +127,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
             glue.conn_handle = event->connect.conn_handle;
             glue.pairing = false;
             serial_gatt_set_conn(event->connect.conn_handle, true);
+            hid_gatt_set_conn(event->connect.conn_handle, true);
             FURI_LOG_I(TAG, "Connected, handle %u", event->connect.conn_handle);
         } else {
             maybe_advertise();
@@ -130,6 +139,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         glue.conn_handle = BLE_HS_CONN_HANDLE_NONE;
         glue.pairing = false;
         serial_gatt_set_conn(0, false);
+        hid_gatt_set_conn(0, false);
         /* CCCDs written during the connection. */
         bond_store_save();
         maybe_advertise();
@@ -148,6 +158,7 @@ static int gap_event(struct ble_gap_event* event, void* arg) {
         serial_gatt_on_subscribe(
             event->subscribe.attr_handle,
             event->subscribe.cur_notify || event->subscribe.cur_indicate);
+        hid_gatt_on_subscribe(event->subscribe.attr_handle, event->subscribe.cur_notify);
         break;
 
     case BLE_GAP_EVENT_PASSKEY_ACTION:
@@ -196,6 +207,7 @@ static void on_sync(void) {
         return;
     }
     glue.synced = true;
+    hid_gatt_set_visible(glue.hid_advertised, false);
     maybe_advertise();
 }
 
@@ -242,6 +254,16 @@ static void reload_event_fn(struct ble_npl_event* ev) {
     bond_store_load();
 }
 
+static void readvertise_event_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    if(glue.synced) hid_gatt_set_visible(glue.hid_advertised, true);
+    if(glue.advertising) {
+        ble_gap_adv_stop();
+        glue.advertising = false;
+    }
+    maybe_advertise();
+}
+
 static void post(struct ble_npl_event* ev) {
     if(glue.started) ble_npl_eventq_put(nimble_port_get_dflt_eventq(), ev);
 }
@@ -264,6 +286,7 @@ bool nimble_glue_start(void) {
     ble_npl_event_init(&disconnect_event, disconnect_event_fn, NULL);
     ble_npl_event_init(&forget_event, forget_event_fn, NULL);
     ble_npl_event_init(&reload_event, reload_event_fn, NULL);
+    ble_npl_event_init(&readvertise_event, readvertise_event_fn, NULL);
     ble_hs_cfg.reset_cb = on_reset;
     ble_hs_cfg.sync_cb = on_sync;
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
@@ -276,7 +299,8 @@ bool nimble_glue_start(void) {
     const char* name = furi_hal_version_get_device_name_ptr();
     ble_svc_gap_device_name_set(name ? name : "Flipper");
 
-    if(info_gatt_register() != 0 || serial_gatt_register() != 0) return false;
+    if(info_gatt_register() != 0 || serial_gatt_register() != 0 || hid_gatt_register() != 0)
+        return false;
     serial_gatt_init();
 
     glue.host = furi_thread_alloc_ex("NimbleHost", HOST_STACK_SIZE, host_task, NULL);
@@ -333,4 +357,18 @@ void nimble_glue_set_battery_level(uint8_t level) {
 
 void nimble_glue_set_power_state(bool charging) {
     if(glue.started) info_gatt_set_power_state(charging);
+}
+
+void nimble_glue_set_hid_advertised(bool advertised) {
+    if(glue.hid_advertised == advertised) return;
+    glue.hid_advertised = advertised;
+    post(&readvertise_event);
+}
+
+void nimble_glue_hid_set_report_map(const uint8_t* data, uint16_t len) {
+    if(glue.started && data && len) hid_gatt_set_report_map(data, len);
+}
+
+bool nimble_glue_hid_input_report(uint8_t report_id, const uint8_t* data, uint16_t len) {
+    return glue.started && hid_gatt_input_report(report_id, data, len);
 }

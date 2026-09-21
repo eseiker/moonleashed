@@ -10,6 +10,7 @@
 #include <assets_icons.h>
 #include <profiles/serial_profile.h>
 #include <nimble_glue.h>
+#include <gatt_host_shim.h>
 
 #define TAG "BtSrv"
 
@@ -410,7 +411,8 @@ void bt_close_rpc_connection(Bt* bt) {
     }
 }
 
-// NimBLE serves the serial profile itself; other profiles need a GATT backend
+// NimBLE serves the serial profile itself. App profiles start over the GATT
+// shim, as furi_hal_bt_change_app would start them over CPU2.
 static void bt_nimble_change_profile(Bt* bt, BtMessage* message) {
     const FuriHalBleProfileTemplate* template = message->data.profile.template;
     // Sized like BleProfileSerial, so its accessors find NULL services
@@ -421,15 +423,21 @@ static void bt_nimble_change_profile(Bt* bt, BtMessage* message) {
 
     // As stock, a profile change drops the link
     nimble_glue_disconnect();
+    if(bt->nimble_profile_started) {
+        bt->current_profile->config->stop(bt->current_profile);
+        bt->nimble_profile_started = false;
+    }
 
     FuriHalBleProfileBase* instance = NULL;
     if(!template || template == ble_profile_serial) {
         serial_profile.base.config = ble_profile_serial;
         instance = &serial_profile.base;
-        nimble_glue_set_advertising_enabled(bt->bt_settings.enabled);
     } else {
-        bt_show_warning(bt, "Radio stack doesn't support this app");
+        instance = template->start(message->data.profile.params);
+        bt->nimble_profile_started = instance != NULL;
     }
+    nimble_glue_set_hid_advertised(ble_gatt_host_shim_has_hid());
+    nimble_glue_set_advertising_enabled(bt->bt_settings.enabled);
 
     bt->current_profile = instance;
     if(message->profile_instance) *message->profile_instance = instance;
@@ -600,6 +608,28 @@ static void bt_nimble_poll_callback(void* context) {
     }
 }
 
+// The HID report map and reports and the battery level map onto NimBLE's
+// services; the rest is served statically
+static void bt_nimble_gatt_update(
+    uint16_t char_uuid16,
+    uint16_t report_ref,
+    const uint8_t* data,
+    uint16_t len,
+    void* context) {
+    UNUSED(context);
+    if(char_uuid16 == 0x2A4D /* HID report */ && (report_ref >> 8) == 0x01 /* input */) {
+        nimble_glue_hid_input_report(report_ref & 0xFF, data, len);
+    } else if(char_uuid16 == 0x2A4B /* HID report map */) {
+        nimble_glue_hid_set_report_map(data, len);
+    } else if(char_uuid16 == 0x2A19 /* battery level */ && len >= 1) {
+        nimble_glue_set_battery_level(data[0]);
+    }
+}
+
+static const BleGattHostShim bt_nimble_gatt_shim = {
+    .on_update = bt_nimble_gatt_update,
+};
+
 // The HCILayer radio has no host on CPU2: run NimBLE on the raw controller
 static bool bt_nimble_start(Bt* bt) {
     if(!furi_hal_bt_hci_acquire()) return false;
@@ -607,6 +637,7 @@ static bool bt_nimble_start(Bt* bt) {
         furi_hal_bt_hci_release();
         return false;
     }
+    ble_gatt_host_shim_set(&bt_nimble_gatt_shim);
     bt->nimble_active = true;
     FuriTimer* timer = furi_timer_alloc(bt_nimble_poll_callback, FuriTimerTypePeriodic, bt);
     furi_timer_start(timer, furi_ms_to_ticks(400));
