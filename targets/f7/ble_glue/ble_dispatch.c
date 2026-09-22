@@ -5,7 +5,7 @@
 #define TAG "BleDispatch"
 
 #define QUEUE_DEPTH 64
-#define STACK_SIZE  3072
+#define STACK_SIZE  2048
 
 typedef struct {
     BleDispatchFn fn;

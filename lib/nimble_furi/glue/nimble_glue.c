@@ -32,7 +32,7 @@
 
 #define TAG "NimbleGlue"
 
-#define HOST_STACK_SIZE 4096
+#define HOST_STACK_SIZE 2048
 
 /* ST vendor command: write the public address into the controller. */
 #define ACI_HAL_WRITE_CONFIG_DATA_OCF 0x000C
