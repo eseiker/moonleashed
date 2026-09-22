@@ -638,6 +638,7 @@ static const BleGattHostShim bt_nimble_gatt_shim = {
 
 // The HCILayer radio has no host on CPU2: run NimBLE on the raw controller
 static bool bt_nimble_start(Bt* bt) {
+    nimble_transport_furi_attach();
     if(!furi_hal_bt_hci_acquire()) return false;
     if(!nimble_glue_start()) {
         furi_hal_bt_hci_release();

@@ -11,6 +11,10 @@ extern "C" {
 #endif
 
 /* Start the host on an acquired controller. */
+/* Before furi_hal_bt_hci_acquire: routes controller frames to the host. */
+void nimble_transport_furi_attach(void);
+void nimble_transport_furi_drops(uint32_t* evt, uint32_t* acl);
+
 bool nimble_glue_start(void);
 
 /* True once started: the HAL then routes to NimBLE, synced or not. */

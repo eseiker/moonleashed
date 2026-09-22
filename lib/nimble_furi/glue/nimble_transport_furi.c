@@ -1,14 +1,17 @@
-/* NimBLE H4 transport over furi_hal_bt_hci. */
+/* NimBLE H4 transport over furi_hal_bt_hci. Frames from the controller are
+ * handed to the host straight from the IPCC interrupt, as upstream's UART
+ * transport does from its RX interrupt: no queue and no reader thread. */
 
 #include <furi.h>
 #include <furi_hal_bt_hci.h>
 
 #include "nimble/ble.h"
+#include "nimble/hci_common.h"
 #include "nimble/nimble_npl.h"
 #include "nimble/transport.h"
 #include "os/os_mbuf.h"
 
-#define TAG "NimbleHci"
+#include "nimble_glue.h"
 
 #define H4_CMD 0x01
 #define H4_ACL 0x02
@@ -16,7 +19,8 @@
 
 #define HCI_SEND_TIMEOUT_MS 2000
 
-static FuriThread* reader;
+static volatile uint32_t dropped_evt;
+static volatile uint32_t dropped_acl;
 
 int ble_transport_to_ll_cmd_impl(void* buf) {
     const uint8_t* cmd = buf;
@@ -62,69 +66,50 @@ int ble_transport_to_ll_iso_impl(struct os_mbuf* om) {
     return BLE_ERR_UNSUPPORTED;
 }
 
-static void reader_deliver_evt(const uint8_t* body, size_t length) {
-    if(length > MYNEWT_VAL(BLE_TRANSPORT_EVT_SIZE)) {
-        FURI_LOG_W(TAG, "Event too long; dropping %u bytes", (unsigned)length);
+// IPCC interrupt. Advertising reports may be dropped; anything else waits for
+// a buffer in the discardable pool as well.
+static void rx_evt(const uint8_t* body, size_t length) {
+    bool discardable = body[0] == BLE_HCI_EVCODE_LE_META && length > 2 &&
+                       (body[2] == BLE_HCI_LE_SUBEV_ADV_RPT ||
+                        body[2] == BLE_HCI_LE_SUBEV_EXT_ADV_RPT);
+    uint8_t* evt = length <= MYNEWT_VAL(BLE_TRANSPORT_EVT_SIZE) ?
+                       ble_transport_alloc_evt(discardable) :
+                       NULL;
+    if(!evt) {
+        dropped_evt++;
         return;
-    }
-    /* Dropping an event can desync the host: wait for a buffer. */
-    uint8_t* evt;
-    for(uint32_t tries = 0; !(evt = ble_transport_alloc_evt(0)); tries++) {
-        if(tries == 1000) {
-            FURI_LOG_E(TAG, "No event buffer; dropping %u bytes", (unsigned)length);
-            return;
-        }
-        furi_delay_ms(1);
     }
     memcpy(evt, body, length);
-    if(ble_transport_to_hs_evt(evt) != 0) {
-        FURI_LOG_W(TAG, "Host rejected event");
-    }
+    if(ble_transport_to_hs_evt(evt) != 0) dropped_evt++;
 }
 
-static void reader_deliver_acl(const uint8_t* body, size_t length) {
+static void rx_acl(const uint8_t* body, size_t length) {
     struct os_mbuf* om = ble_transport_alloc_acl_from_ll();
-    if(!om) {
-        FURI_LOG_W(TAG, "No ACL buffer; dropping %u bytes", (unsigned)length);
-        return;
-    }
-    if(os_mbuf_append(om, body, length) != 0) {
-        os_mbuf_free_chain(om);
+    if(!om || os_mbuf_append(om, body, length) != 0) {
+        if(om) os_mbuf_free_chain(om);
+        dropped_acl++;
         return;
     }
     ble_transport_to_hs_acl(om);
 }
 
-static int32_t reader_thread(void* context) {
+static void rx_frame(const uint8_t* frame, size_t length, void* context) {
     UNUSED(context);
-    uint8_t frame[FURI_HAL_BT_HCI_FRAME_MAX];
-
-    bool faulted = false;
-    for(;;) {
-        int32_t n = furi_hal_bt_hci_receive(frame, sizeof(frame), 100);
-        if(n < 0) {
-            /* Faulted or released; events resume once the bridge is acquired again. */
-            if(!faulted) FURI_LOG_E(TAG, "HCI transport fault");
-            faulted = true;
-            furi_delay_ms(100);
-            continue;
-        }
-        faulted = false;
-        if(n == 0) {
-            continue;
-        }
-        if(frame[0] == H4_EVT) {
-            reader_deliver_evt(frame + 1, n - 1);
-        } else if(frame[0] == H4_ACL) {
-            reader_deliver_acl(frame + 1, n - 1);
-        } else {
-            FURI_LOG_W(TAG, "Unexpected H4 type 0x%02X", frame[0]);
-        }
+    if(frame[0] == H4_EVT) {
+        rx_evt(frame + 1, length - 1);
+    } else if(frame[0] == H4_ACL) {
+        rx_acl(frame + 1, length - 1);
     }
-    return 0;
+}
+
+void nimble_transport_furi_attach(void) {
+    furi_hal_bt_hci_set_rx_callback(rx_frame, NULL);
+}
+
+void nimble_transport_furi_drops(uint32_t* evt, uint32_t* acl) {
+    *evt = dropped_evt;
+    *acl = dropped_acl;
 }
 
 void ble_transport_ll_init(void) {
-    reader = furi_thread_alloc_ex("NimbleHciRx", 2048, reader_thread, NULL);
-    furi_thread_start(reader);
 }

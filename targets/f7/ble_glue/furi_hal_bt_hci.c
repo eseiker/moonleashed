@@ -18,6 +18,8 @@ PLACE_IN_SECTION("MB_MEM2")
 ALIGN(4) static uint8_t acl_buffer[sizeof(TL_PacketHeader_t) + FURI_HAL_BT_HCI_FRAME_MAX];
 
 static FuriMessageQueue* rx_queue;
+static FuriHalBtHciRxCallback rx_callback;
+static void* rx_context;
 static FuriSemaphore* command_free;
 static FuriSemaphore* acl_free;
 static bool initialized;
@@ -80,9 +82,13 @@ static void controller_event(TL_EvtPacket_t* packet) {
         if(read_le16(bytes + (complete ? 4 : 5)) != pending_opcode) return;
     }
 
-    frame.length = length;
-    memcpy(frame.bytes, bytes, length);
-    if(furi_message_queue_put(rx_queue, &frame, 0) != FuriStatusOk) fault = true;
+    if(rx_callback) {
+        rx_callback(bytes, length, rx_context);
+    } else {
+        frame.length = length;
+        memcpy(frame.bytes, bytes, length);
+        if(furi_message_queue_put(rx_queue, &frame, 0) != FuriStatusOk) fault = true;
+    }
 
     if(response) {
         bool complete = bytes[1] == 0x0e;
@@ -111,13 +117,13 @@ bool furi_hal_bt_hci_acquire(void) {
     }
 
     if(!initialized) {
-        rx_queue = furi_message_queue_alloc(32, sizeof(HciFrame));
         command_free = furi_semaphore_alloc(1, 1);
         acl_free = furi_semaphore_alloc(1, 1);
         initialized = true;
     }
+    if(!rx_callback && !rx_queue) rx_queue = furi_message_queue_alloc(32, sizeof(HciFrame));
 
-    furi_message_queue_reset(rx_queue);
+    if(rx_queue) furi_message_queue_reset(rx_queue);
     acl_pending = false;
     pending_opcode = 0;
     command_status = 0xff;
@@ -173,8 +179,14 @@ bool furi_hal_bt_hci_send(const uint8_t* frame, size_t length, uint32_t timeout_
     return false;
 }
 
+void furi_hal_bt_hci_set_rx_callback(FuriHalBtHciRxCallback callback, void* context) {
+    furi_check(!owned);
+    rx_context = context;
+    rx_callback = callback;
+}
+
 int32_t furi_hal_bt_hci_receive(uint8_t* frame, size_t capacity, uint32_t timeout_ms) {
-    if(!owned || fault || !frame || capacity < FURI_HAL_BT_HCI_FRAME_MAX) return -1;
+    if(!owned || fault || !frame || !rx_queue || capacity < FURI_HAL_BT_HCI_FRAME_MAX) return -1;
     HciFrame next;
     if(furi_message_queue_get(rx_queue, &next, timeout_ms) != FuriStatusOk) return fault ? -1 : 0;
     memcpy(frame, next.bytes, next.length);
