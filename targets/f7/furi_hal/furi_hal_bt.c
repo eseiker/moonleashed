@@ -334,15 +334,20 @@ void furi_hal_bt_dump_state(FuriString* buffer) {
 
     if(nimble_glue_is_started()) {
         const BleGlueC2Info* info = ble_glue_get_c2_info();
+        uint32_t dropped_evt, dropped_acl;
+        nimble_transport_furi_drops(&dropped_evt, &dropped_acl);
         furi_string_cat_printf(
             buffer,
-            "NimBLE host, radio stack type %d, %d.%d.%d, advertising %d, connected %d",
+            "NimBLE host, radio stack type %d, %d.%d.%d, advertising %d, connected %d, "
+            "dropped evt %lu acl %lu",
             info->StackType,
             info->VersionMajor,
             info->VersionMinor,
             info->VersionSub,
             nimble_glue_is_advertising(),
-            nimble_glue_is_connected());
+            nimble_glue_is_connected(),
+            dropped_evt,
+            dropped_acl);
     } else if(furi_hal_bt_is_alive()) {
         uint8_t HCI_Version;
         uint16_t HCI_Revision;

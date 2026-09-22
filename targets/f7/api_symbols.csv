@@ -1527,6 +1527,7 @@ Function,-,furi_hal_bt_hci_acquire,_Bool,
 Function,-,furi_hal_bt_hci_receive,int32_t,"uint8_t*, size_t, uint32_t"
 Function,-,furi_hal_bt_hci_release,_Bool,
 Function,-,furi_hal_bt_hci_send,_Bool,"const uint8_t*, size_t, uint32_t"
+Function,-,furi_hal_bt_hci_set_rx_callback,void,"FuriHalBtHciRxCallback, void*"
 Function,-,furi_hal_bt_init,void,
 Function,+,furi_hal_bt_is_active,_Bool,
 Function,+,furi_hal_bt_is_alive,_Bool,
