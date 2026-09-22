@@ -20,6 +20,7 @@
 #define HCI_SEND_TIMEOUT_MS 2000
 
 static volatile uint32_t dropped_evt;
+static volatile uint32_t dropped_adv;
 static volatile uint32_t dropped_acl;
 
 int ble_transport_to_ll_cmd_impl(void* buf) {
@@ -66,17 +67,19 @@ int ble_transport_to_ll_iso_impl(struct os_mbuf* om) {
     return BLE_ERR_UNSUPPORTED;
 }
 
-// IPCC interrupt. Advertising reports may be dropped; anything else waits for
-// a buffer in the discardable pool as well.
+// IPCC interrupt. Advertising reports may be dropped; anything else falls
+// back to the discardable pool.
 static void rx_evt(const uint8_t* body, size_t length) {
-    bool discardable = body[0] == BLE_HCI_EVCODE_LE_META && length > 2 &&
-                       (body[2] == BLE_HCI_LE_SUBEV_ADV_RPT ||
-                        body[2] == BLE_HCI_LE_SUBEV_EXT_ADV_RPT);
-    uint8_t* evt = length <= MYNEWT_VAL(BLE_TRANSPORT_EVT_SIZE) ?
-                       ble_transport_alloc_evt(discardable) :
-                       NULL;
+    bool discardable =
+        body[0] == BLE_HCI_EVCODE_LE_META && length > 2 &&
+        (body[2] == BLE_HCI_LE_SUBEV_ADV_RPT || body[2] == BLE_HCI_LE_SUBEV_EXT_ADV_RPT);
+    uint8_t* evt =
+        length <= MYNEWT_VAL(BLE_TRANSPORT_EVT_SIZE) ? ble_transport_alloc_evt(discardable) : NULL;
     if(!evt) {
-        dropped_evt++;
+        if(discardable)
+            dropped_adv++;
+        else
+            dropped_evt++;
         return;
     }
     memcpy(evt, body, length);
@@ -106,8 +109,9 @@ void nimble_transport_furi_attach(void) {
     furi_hal_bt_hci_set_rx_callback(rx_frame, NULL);
 }
 
-void nimble_transport_furi_drops(uint32_t* evt, uint32_t* acl) {
+void nimble_transport_furi_drops(uint32_t* evt, uint32_t* adv, uint32_t* acl) {
     *evt = dropped_evt;
+    *adv = dropped_adv;
     *acl = dropped_acl;
 }
 
