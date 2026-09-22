@@ -1,0 +1,129 @@
+name: Sync upstream release
+
+# Daily: when upstream Unleashed publishes a release, merge it into main, build,
+# and publish mnlshd-<upstream number>.<revision> (mnlshd-93.1 for unlshd-093)
+# with the update package and a zip of the other build outputs. `release`
+# mirrors upstream's release branch and records what was last synced; never
+# commit to it. A manual run with publish_revision publishes the next revision
+# from the current main.
+#
+# The API version becomes one minor step above the higher of upstream's and
+# ours. A conflict confined to the Version line is resolved; any other conflict
+# stops the run with nothing pushed.
+#
+# GITHUB_TOKEN cannot push workflow files, which upstream edits in most
+# releases: set a SYNC_TOKEN secret with Contents and Workflows write access.
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+    inputs:
+      publish_revision:
+        description: "Publish a new revision even without a new upstream release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency: sync-upstream-release
+
+env:
+  UPSTREAM: https://github.com/DarkFlippers/unleashed-firmware.git
+  API_CSV: targets/f7/api_symbols.csv
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      new: ${{ steps.compare.outputs.new }}
+    steps:
+      - id: compare
+        run: |
+          UPSTREAM_TIP="$(git ls-remote "$UPSTREAM" refs/heads/release | cut -f1)"
+          MIRROR="$(git ls-remote "https://github.com/${{ github.repository }}" refs/heads/release | cut -f1)"
+          echo "upstream release $UPSTREAM_TIP, mirror ${MIRROR:-none}"
+          if [ "$UPSTREAM_TIP" != "$MIRROR" ] || [ "${{ inputs.publish_revision }}" = "true" ]; then
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  merge-and-build:
+    needs: check
+    if: needs.check.outputs.new == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Merge the upstream release
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags "$UPSTREAM" +refs/heads/release:refs/remotes/upstream/release
+
+          UPSTREAM_TAG="$(git tag -l 'unlshd-*' --points-at upstream/release | head -1)"
+          [ -n "$UPSTREAM_TAG" ] || { echo "::error::upstream release is not tagged unlshd-*"; exit 1; }
+          NUMBER=$((10#${UPSTREAM_TAG#unlshd-}))
+          PUBLISHED="$(git ls-remote --tags origin "mnlshd-$NUMBER.*" | grep -vc '\^{}' || true)"
+          TAG="mnlshd-$NUMBER.$((PUBLISHED + 1))"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "upstream_tag=$UPSTREAM_TAG" >> "$GITHUB_OUTPUT"
+
+          if git merge-base --is-ancestor upstream/release main; then
+            echo "main already contains $UPSTREAM_TAG; building $TAG from it."
+            exit 0
+          fi
+
+          UPSTREAM_API="$(git show "upstream/release:$API_CSV" | grep -m1 '^Version,' | cut -d, -f3)"
+          OUR_API="$(grep -m1 '^Version,' "$API_CSV" | cut -d, -f3)"
+          NEW_API="$(printf '%s\n' "$UPSTREAM_API" "$OUR_API" | sort -t. -k1,1n -k2,2n | tail -1 \
+            | awk -F. '{ printf "%d.%d", $1, $2 + 1 }')"
+
+          if ! git merge --no-ff --no-commit upstream/release; then
+            # Resolve a conflict made of nothing but Version lines; abort on any other.
+            if [ "$(git diff --name-only --diff-filter=U)" != "$API_CSV" ] || ! awk -v v="$NEW_API" '
+                /^<<<<<<< / { c = 1; next }
+                c && /^>>>>>>> / { c = 0; print "Version,+," v ",,"; next }
+                c { if ($0 !~ /^(Version,|=======|\|\|\|\|\|\|\| )/) exit 1; next }
+                { print }' "$API_CSV" > "$API_CSV.merged"; then
+              git merge --abort
+              echo "::error::$UPSTREAM_TAG conflicts beyond the API version line; merge it by hand."
+              exit 1
+            fi
+            mv "$API_CSV.merged" "$API_CSV"
+          fi
+          sed -i "s/^Version,+,[0-9.]*,,/Version,+,$NEW_API,,/" "$API_CSV"
+          git add "$API_CSV"
+          git commit -m "Merge upstream $UPSTREAM_TAG into main, API $NEW_API"
+
+      - name: Build and check the apps' imports
+        env:
+          DIST_SUFFIX: ${{ steps.merge.outputs.tag }}
+        run: |
+          ./fbt COMPACT=1 DEBUG=0 DIST_SUFFIX="$DIST_SUFFIX" updater_package
+          ./fbt COMPACT=1 DEBUG=0 DIST_SUFFIX="$DIST_SUFFIX" lint_fap_imports
+
+      - name: Push main and the release mirror
+        run: |
+          git push origin main
+          git push origin upstream/release:refs/heads/release
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.merge.outputs.tag }}
+          UPSTREAM_TAG: ${{ steps.merge.outputs.upstream_tag }}
+        run: |
+          cd dist/f7-C
+          zip -j "flipper-z-f7-artifacts-$TAG.zip" $(find . -maxdepth 1 -type f ! -name '*.tgz')
+          gh release create "$TAG" --target main --title "$TAG" \
+            --notes "Moonleashed on upstream Unleashed $UPSTREAM_TAG. The update package installs the HCILayer radio." \
+            "flipper-z-f7-update-$TAG.tgz" "flipper-z-f7-artifacts-$TAG.zip"

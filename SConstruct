@@ -394,7 +394,14 @@ distenv.PhonyTarget(
     IMG_LINT_SOURCES=firmware_env["IMG_LINT_SOURCES"],
 )
 
-distenv.Alias("lint_all", ["lint", "lint_py", "lint_img"])
+# Check that every built app can resolve its imports at load time. A .fap links
+# with imports undefined by design, so only the device catches a missing export.
+distenv.PhonyTarget(
+    "lint_fap_imports",
+    [["${PYTHON3}", "${FBT_SCRIPT_DIR}/check_fap_imports.py"]],
+)
+
+distenv.Alias("lint_all", ["lint", "lint_py", "lint_img", "lint_fap_imports"])
 distenv.Alias("format_all", ["format", "format_py", "format_img"])
 
 
