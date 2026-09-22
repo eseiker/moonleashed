@@ -682,10 +682,13 @@ static void on_reset(int reason) {
     }
 }
 
+static bool test_reset_if_needed(void);
+
 static void adv_setting_event_fn(struct ble_npl_event* ev) {
     UNUSED(ev);
     if(!glue.adv_disabled) {
-        maybe_advertise();
+        /* After a radio test: on_sync advertises once the reset is done. */
+        if(!test_reset_if_needed()) maybe_advertise();
         return;
     }
     if(glue.advertising) {
@@ -1158,14 +1161,16 @@ BleLinkDisconnectStatus ble_link_disconnect(uint16_t conn_handle, uint8_t reason
 /* Slot 0 in state, the other seven idle. */
 static bool ll_wait(uint8_t state, uint32_t timeout_ms) {
     uint8_t rsp[24]; /* 8 states, 8 connection handles */
-    for(uint32_t waited = 0;; waited += 10) {
+    uint32_t deadline = furi_get_tick() + furi_ms_to_ticks(timeout_ms);
+    for(;;) {
         if(ble_hs_hci_send_vs_cmd(ACI_HAL_GET_LINK_STATUS_OCF, NULL, 0, rsp, sizeof(rsp)) != 0)
             return false;
         bool match = rsp[0] == state;
         for(uint8_t i = 1; i < 8 && match; i++)
             match = rsp[i] == LL_STATE_IDLE;
         if(match) return true;
-        if(waited >= timeout_ms) {
+        /* Wall clock: an unanswered command already waits 2 s inside NimBLE. */
+        if((int32_t)(furi_get_tick() - deadline) >= 0) {
             if(timeout_ms) FURI_LOG_W(TAG, "Link layer busy, test not started");
             return false;
         }
@@ -1174,23 +1179,35 @@ static bool ll_wait(uint8_t state, uint32_t timeout_ms) {
 }
 
 /* CPU2 hard-faulted now and then after a test unless the controller was reset.
- * NimBLE resyncs and on_sync advertises again if Bluetooth is on. */
+ * The reset waits until Bluetooth goes back to normal use, so a stop followed
+ * by another start, as in a hopping carrier test, costs nothing; NimBLE then
+ * resyncs and on_sync advertises again. */
+static volatile bool test_reset_needed;
 static volatile bool test_reset_pending;
 static volatile uint32_t test_reset_sync_count;
 
 static void test_end_reset(void) {
+    test_reset_needed = true;
+}
+
+/* Host thread, when advertising is enabled again. */
+static bool test_reset_if_needed(void) {
+    if(!test_reset_needed) return false;
+    test_reset_needed = false;
     test_reset_sync_count = glue.sync_count;
     test_reset_pending = true;
     ble_hs_sched_reset(BLE_HS_ECONTROLLER);
+    return true;
 }
 
-/* A test started right after a stop waits here for that reset's resync. */
+/* A test started while that reset is in flight waits here for its resync. */
 static bool test_wait_resync(void) {
     for(uint32_t waited = 0; test_reset_pending; waited += 10) {
         if(glue.synced && glue.sync_count != test_reset_sync_count) {
             test_reset_pending = false;
         } else if(waited >= 3000) {
             FURI_LOG_W(TAG, "No resync after the last test");
+            test_reset_pending = false;
             return false;
         } else {
             furi_delay_ms(10);
