@@ -161,6 +161,8 @@ bool ble_gatt_server_char_handles(int32_t char_id, uint16_t* decl_handle, uint16
 
 bool ble_gatt_server_commit(void) {
     if(!started) return false;
+    // Counted as live now: a deinit before the rebuild runs must still rebuild
+    live_services |= own_services;
     nimble_glue_gatt_rebuild();
     return true;
 }
