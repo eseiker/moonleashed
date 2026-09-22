@@ -81,10 +81,20 @@ static struct {
     char name[30]; /* the longest name a legacy advertisement carries, plus NUL */
     NimbleCentralCb cb;
     void* ctx;
+    /* A new link can still fail to establish (HCI 0x3E) in its first few
+     * intervals, so Connected is reported after a short confirmation window
+     * and a failure inside it retries the connect. Host thread. */
+    ble_addr_t peer;
+    uint8_t retries;
+    bool unconfirmed;
 } central;
 static FuriMutex* central_mutex;
 static struct ble_npl_event central_start_event;
 static struct ble_npl_event central_stop_event;
+static struct ble_npl_callout central_confirm_callout;
+
+#define CENTRAL_CONFIRM_MS 400
+#define CENTRAL_RETRIES    2
 
 /* Links an app asked to drop, handled on the host thread. */
 static struct {
@@ -488,9 +498,39 @@ static void central_notify(NimbleCentralEventKind kind, uint16_t conn, int statu
 static void central_end(NimbleCentralEventKind kind, uint16_t conn, int status) {
     central_notify(kind, conn, status);
     central.active = false;
+    central.unconfirmed = false;
+    ble_npl_callout_stop(&central_confirm_callout);
     central.conn_handle = BLE_HS_CONN_HANDLE_NONE;
     maybe_advertise();
     ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &gatt_rebuild_event);
+}
+
+static int central_gap_event(struct ble_gap_event* event, void* arg);
+
+static int central_connect(void) {
+    return ble_gap_connect(glue.addr_type, &central.peer, 5000, NULL, central_gap_event, NULL);
+}
+
+// True if a failed establishment was retried instead of ending the session
+static bool central_retry(int status) {
+    if(status != BLE_HS_ERR_HCI_BASE + BLE_ERR_CONN_ESTABLISHMENT || central.stopping ||
+       central.retries >= CENTRAL_RETRIES) {
+        return false;
+    }
+    central.retries++;
+    central.conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    FURI_LOG_W(TAG, "Central link failed to establish, retry %u", central.retries);
+    int rc = central_connect();
+    if(rc != 0) central_end(NimbleCentralFailed, 0, rc);
+    return true;
+}
+
+// Host thread: the link survived its first intervals
+static void central_confirm_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    if(!central.active || !central.unconfirmed) return;
+    central.unconfirmed = false;
+    central_notify(NimbleCentralConnected, central.conn_handle, 0);
 }
 
 static int central_gap_event(struct ble_gap_event* event, void* arg) {
@@ -498,7 +538,9 @@ static int central_gap_event(struct ble_gap_event* event, void* arg) {
     switch(event->type) {
     case BLE_GAP_EVENT_CONNECT:
         if(event->connect.status != 0) {
-            central_end(NimbleCentralFailed, 0, event->connect.status);
+            if(!central_retry(event->connect.status)) {
+                central_end(NimbleCentralFailed, 0, event->connect.status);
+            }
             break;
         }
         central.conn_handle = event->connect.conn_handle;
@@ -507,12 +549,23 @@ static int central_gap_event(struct ble_gap_event* event, void* arg) {
             ble_gap_terminate(central.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
             break;
         }
-        central_notify(NimbleCentralConnected, central.conn_handle, 0);
+        central.unconfirmed = true;
+        ble_npl_callout_reset(
+            &central_confirm_callout, ble_npl_time_ms_to_ticks32(CENTRAL_CONFIRM_MS));
         break;
 
     case BLE_GAP_EVENT_DISCONNECT:
         on_app_link_security(event);
-        central_end(NimbleCentralDisconnected, central.conn_handle, event->disconnect.reason);
+        if(!central.unconfirmed) {
+            central_end(NimbleCentralDisconnected, central.conn_handle, event->disconnect.reason);
+            break;
+        }
+        // The app never saw this link
+        central.unconfirmed = false;
+        ble_npl_callout_stop(&central_confirm_callout);
+        if(!central_retry(event->disconnect.reason)) {
+            central_end(NimbleCentralFailed, 0, event->disconnect.reason);
+        }
         break;
 
     // The peer may use our runtime GATT services over this link too
@@ -564,8 +617,8 @@ static int central_disc_event(struct ble_gap_event* event, void* arg) {
     }
 
     ble_gap_disc_cancel();
-    int rc =
-        ble_gap_connect(glue.addr_type, &event->disc.addr, 5000, NULL, central_gap_event, NULL);
+    central.peer = event->disc.addr;
+    int rc = central_connect();
     if(rc != 0) central_end(NimbleCentralFailed, 0, rc);
     return 0;
 }
@@ -577,6 +630,8 @@ static void central_start_event_fn(struct ble_npl_event* ev) {
         ble_gap_adv_stop();
         glue.advertising = false;
     }
+    // A cancel that failed when the last session stopped leaves the scan running
+    if(ble_gap_disc_active()) ble_gap_disc_cancel();
     struct ble_gap_disc_params params = {.filter_duplicates = 1};
     int rc = ble_gap_disc(glue.addr_type, BLE_HS_FOREVER, &params, central_disc_event, NULL);
     if(rc != 0) central_end(NimbleCentralFailed, 0, rc);
@@ -823,6 +878,8 @@ bool nimble_glue_start(void) {
     ble_npl_event_init(&gatt_rebuild_event, gatt_rebuild_event_fn, NULL);
     ble_npl_callout_init(
         &gatt_retry_callout, nimble_port_get_dflt_eventq(), gatt_rebuild_event_fn, NULL);
+    ble_npl_callout_init(
+        &central_confirm_callout, nimble_port_get_dflt_eventq(), central_confirm_fn, NULL);
     ble_npl_event_init(&beacon_event, beacon_event_fn, NULL);
     ble_npl_event_init(&central_start_event, central_start_event_fn, NULL);
     ble_npl_event_init(&central_stop_event, central_stop_event_fn, NULL);
@@ -1038,6 +1095,8 @@ bool nimble_glue_central_start(const char* name, NimbleCentralCb cb, void* ctx) 
         strlcpy(central.name, name, sizeof(central.name));
         central.conn_handle = BLE_HS_CONN_HANDLE_NONE;
         central.stopping = false;
+        central.unconfirmed = false;
+        central.retries = 0;
         central.cb = cb;
         central.ctx = ctx;
         central.active = true;
