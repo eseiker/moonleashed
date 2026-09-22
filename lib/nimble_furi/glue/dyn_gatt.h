@@ -3,6 +3,8 @@
  *
  * Handles follow the ST layout the stock API assumes: declaration H, value
  * H+1, CCCD H+2 with notify or indicate, then the optional descriptor.
+ * Bonded peers' CCCDs are stored by handle, so after a rebuild a subscription
+ * can carry over to whichever characteristic now has that handle.
  * Plain C: the firmware includes this header. */
 
 #pragma once
@@ -14,7 +16,7 @@
 extern "C" {
 #endif
 
-#define DYN_GATT_MAX_SVCS         4
+#define DYN_GATT_MAX_SVCS         8
 #define DYN_GATT_MAX_CHRS_PER_SVC 8
 #define DYN_GATT_VALUE_MAX        512
 #define DYN_GATT_DSC_VALUE_MAX    32
@@ -82,7 +84,8 @@ bool dyn_gatt_dirty(void);
 
 /* nimble_glue, host thread */
 void dyn_gatt_init(void);
-void dyn_gatt_register_all(void);
+/* Returns 0, or NimBLE's error from registering. */
+int dyn_gatt_register_all(void);
 void dyn_gatt_after_start(void);
 void dyn_gatt_on_subscribe(uint16_t conn_handle, uint16_t attr_handle, bool notify, bool indicate);
 void dyn_gatt_on_notify_tx(uint16_t conn_handle, uint16_t attr_handle, int status, bool indication);

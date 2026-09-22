@@ -364,7 +364,7 @@ bool dyn_gatt_dirty(void) {
     return s_dirty;
 }
 
-void dyn_gatt_register_all(void) {
+int dyn_gatt_register_all(void) {
     s_live = false;
     int n = 0;
 
@@ -421,10 +421,11 @@ void dyn_gatt_register_all(void) {
     memset(&s_svc_defs[n], 0, sizeof(s_svc_defs[n]));
     dyn_unlock();
 
-    if(n == 0) return;
+    if(n == 0) return 0;
     int rc = ble_gatts_count_cfg(s_svc_defs);
     if(rc == 0) rc = ble_gatts_add_svcs(s_svc_defs);
     FURI_LOG_I(TAG, "registered %d dynamic service(s), rc=%d", n, rc);
+    return rc;
 }
 
 void dyn_gatt_after_start(void) {

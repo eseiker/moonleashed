@@ -777,9 +777,13 @@ static void gatt_rebuild_event_fn(struct ble_npl_event* ev) {
         ble_hs_max_services = 0;
         ble_hs_max_client_configs = 0;
         rc = register_services();
+        if(rc == 0) rc = dyn_gatt_register_all();
         if(rc == 0) {
-            dyn_gatt_register_all();
             rc = ble_gatts_start();
+        } else {
+            /* Only ble_gatts_start frees the queued definitions; without this
+             * the retry would register them twice. */
+            ble_gatts_start();
         }
     }
     glue.gatt_retry = rc != 0;
