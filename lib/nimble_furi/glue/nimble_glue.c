@@ -961,7 +961,7 @@ void nimble_glue_beacon_stop(void) {
 
 /* An app can exit without calling its furi_ble deinit, leaving callbacks into
  * unloaded code. Each API registers its cleanup, which runs when any app stops. */
-static void (*app_cleanups[8])(void);
+static void (*app_cleanups[12])(void); /* 7 registrants today */
 static volatile bool loader_subscribed;
 
 // Loader thread
