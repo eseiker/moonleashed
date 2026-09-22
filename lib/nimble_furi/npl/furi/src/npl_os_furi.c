@@ -24,7 +24,8 @@ void* ble_npl_get_current_task_id(void) {
 /* Event queue */
 
 void ble_npl_eventq_init(struct ble_npl_eventq* evq) {
-    evq->q = furi_message_queue_alloc(64, sizeof(struct ble_npl_event*));
+    /* Every distinct event object that can be queued at once, with margin */
+    evq->q = furi_message_queue_alloc(96, sizeof(struct ble_npl_event*));
 }
 
 bool ble_npl_eventq_is_empty(struct ble_npl_eventq* evq) {

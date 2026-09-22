@@ -1,7 +1,8 @@
 #pragma once
 
 /* Firmware-internal. App callbacks run on this thread, not on the NimBLE host
- * thread: a slow callback would stall the host. */
+ * thread: a slow callback would stall the host. Its stack is 2 KB: a callback
+ * should hand work to its own thread. */
 
 #include <stdbool.h>
 

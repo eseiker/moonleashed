@@ -9,6 +9,7 @@
 #include "nimble/hci_common.h"
 #include "nimble/nimble_npl.h"
 #include "nimble/transport.h"
+#include "host/ble_hs.h"
 #include "os/os_mbuf.h"
 
 #include "nimble_glue.h"
@@ -19,6 +20,7 @@
 
 #define HCI_SEND_TIMEOUT_MS 2000
 
+static bool ready; /* pools initialised */
 static volatile uint32_t dropped_evt;
 static volatile uint32_t dropped_adv;
 static volatile uint32_t dropped_acl;
@@ -76,10 +78,13 @@ static void rx_evt(const uint8_t* body, size_t length) {
     uint8_t* evt =
         length <= MYNEWT_VAL(BLE_TRANSPORT_EVT_SIZE) ? ble_transport_alloc_evt(discardable) : NULL;
     if(!evt) {
-        if(discardable)
+        if(discardable) {
             dropped_adv++;
-        else
+        } else {
+            // A lost event leaves the host out of step; a reset re-syncs it
             dropped_evt++;
+            ble_hs_sched_reset(BLE_HS_ECONTROLLER);
+        }
         return;
     }
     memcpy(evt, body, length);
@@ -98,6 +103,10 @@ static void rx_acl(const uint8_t* body, size_t length) {
 
 static void rx_frame(const uint8_t* frame, size_t length, void* context) {
     UNUSED(context);
+    if(!ready) {
+        dropped_evt++;
+        return;
+    }
     if(frame[0] == H4_EVT) {
         rx_evt(frame + 1, length - 1);
     } else if(frame[0] == H4_ACL) {
@@ -116,4 +125,5 @@ void nimble_transport_furi_drops(uint32_t* evt, uint32_t* adv, uint32_t* acl) {
 }
 
 void ble_transport_ll_init(void) {
+    ready = true;
 }
