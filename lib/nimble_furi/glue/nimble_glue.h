@@ -13,7 +13,7 @@ extern "C" {
 /* Start the host on an acquired controller. */
 /* Before furi_hal_bt_hci_acquire: routes controller frames to the host. */
 void nimble_transport_furi_attach(void);
-void nimble_transport_furi_drops(uint32_t* evt, uint32_t* acl);
+void nimble_transport_furi_drops(uint32_t* evt, uint32_t* adv, uint32_t* acl);
 
 bool nimble_glue_start(void);
 
