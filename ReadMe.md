@@ -29,7 +29,7 @@ The previous line of development (v1) is kept on the [`v1/main`](../../tree/v1/m
 - **Apps can advertise their own payload** (`furi_ble_adv_*`), once or continuously, beside the companion's link, and **relay raw L2CAP frames on a fixed CID** (`ble_l2cap_fixed_*`).
 - **Apps can drive pairing** (`ble_security_*`): IO capability, passkey, numeric comparison and Secure Connections OOB. The companion's PIN pairing returns when the app ends.
 - **Apps can serve GATT without a profile** (`ble_gatt_server_*`): define services at runtime, commit, and get writes and subscriptions.
-- **The BLE host is lighter on RAM.** Radio frames go from the interrupt straight into NimBLE's buffers, with no queue or reader thread between; about 10 KB of heap comes back to apps.
+- **The BLE host is lighter on RAM.** Radio frames go from the interrupt straight into NimBLE's buffers, with no queue or reader thread between, and BLE apps hand their buffers back when they exit; about 14 KB of heap comes back to other apps.
 
 Everything else follows upstream Unleashed. See its README and changelog for features.
 

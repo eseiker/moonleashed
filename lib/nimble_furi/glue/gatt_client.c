@@ -30,6 +30,7 @@ static struct {
 
 /* One discovery and one subscribe at a time; a second call is refused. */
 static volatile bool discovering;
+static bool in_use; /* an app has the API */
 static volatile bool subscribing;
 
 /* Discovery results collect here. Host thread only. */
@@ -91,6 +92,16 @@ static void map_uuid(const ble_uuid_any_t* u, uint8_t* type, uint16_t* u16, uint
     put_le32(&u128[12], u->u32.value);
 }
 
+// Host thread. The result tables live from the first discovery to the deinit.
+static void release_tables(void* arg) {
+    UNUSED(arg);
+    if(in_use || discovering) return;
+    free(services);
+    free(chars);
+    services = NULL;
+    chars = NULL;
+}
+
 static int on_service(
     uint16_t conn,
     const struct ble_gatt_error* error,
@@ -118,6 +129,7 @@ static int on_service(
     } else {
         post_error(conn, error->status);
     }
+    if(!in_use) release_tables(NULL);
     return 0;
 }
 
@@ -149,6 +161,7 @@ static int on_char(
     } else {
         post_error(conn, error->status);
     }
+    if(!in_use) release_tables(NULL);
     return 0;
 }
 
@@ -327,6 +340,7 @@ static bool claim(volatile bool* busy) {
 
 void ble_gatt_client_init(void) {
     ble_dispatch_init();
+    in_use = true;
     nimble_glue_on_app_stop(ble_gatt_client_deinit);
     ble_dispatch_lock();
     memset(connections, 0, sizeof(connections));
@@ -334,16 +348,21 @@ void ble_gatt_client_init(void) {
 }
 
 void ble_gatt_client_deinit(void) {
+    in_use = false;
     ble_dispatch_lock();
     memset(connections, 0, sizeof(connections));
     ble_dispatch_unlock();
+    nimble_glue_run_on_host(release_tables, NULL, 0);
 }
 
 void ble_gatt_client_set_callback(
     uint16_t connection_handle,
     BleGattClientCallback callback,
     void* context) {
-    if(callback) nimble_glue_on_app_stop(ble_gatt_client_deinit);
+    if(callback) {
+        nimble_glue_on_app_stop(ble_gatt_client_deinit);
+        in_use = true;
+    }
     ble_dispatch_lock();
     for(size_t i = 0; i < MAX_CONNECTIONS; i++) {
         if(connections[i].active && connections[i].connection_handle == connection_handle) {

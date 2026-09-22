@@ -49,7 +49,10 @@ static struct os_mbuf_pool mbuf_pool;
 
 static uint16_t servers[MAX_SERVERS];
 static struct ble_npl_event close_all_event;
+static struct ble_npl_event release_event;
 static bool close_all_ready;
+static bool in_use; /* an app has the API */
+static uint8_t pending; /* channels between accept or connect and CONNECTED */
 
 typedef struct {
     BleL2capCocEvent event;
@@ -98,7 +101,7 @@ static int channel_index(struct ble_l2cap_chan* chan) {
     return -1;
 }
 
-// Allocated on first use and kept: channels may hold its blocks until they close
+// Allocated on first use; freed once the API is idle and every channel is gone
 static struct os_mbuf* sdu_alloc(void) {
     if(!pool_mem) {
         pool_mem = malloc(OS_MEMPOOL_BYTES(POOL_BLOCKS, POOL_BLOCK));
@@ -118,6 +121,22 @@ static bool rearm(struct ble_l2cap_chan* chan) {
     return true;
 }
 
+// Host thread, after NimBLE returned a closed channel's SDUs to the pool
+static void release_fn(struct ble_npl_event* ev) {
+    UNUSED(ev);
+    if(in_use || pending || !pool_mem) return;
+    for(size_t i = 0; i < MAX_CHANNELS; i++) {
+        if(channels[i]) return;
+    }
+    os_mempool_unregister(&pool);
+    free(pool_mem);
+    pool_mem = NULL;
+}
+
+static void post_release(void) {
+    ble_npl_eventq_put(nimble_port_get_dflt_eventq(), &release_event);
+}
+
 static int on_l2cap(struct ble_l2cap_event* event, void* arg) {
     UNUSED(arg);
     EventBlob* b = NULL;
@@ -126,17 +145,22 @@ static int on_l2cap(struct ble_l2cap_event* event, void* arg) {
     case BLE_L2CAP_EVENT_COC_ACCEPT:
         // Refused here, NimBLE answers "no resources" and frees the channel
         if(channel_index(NULL) < 0) return BLE_HS_ENOMEM;
-        return rearm(event->accept.chan) ? 0 : BLE_HS_ENOMEM;
+        if(!rearm(event->accept.chan)) return BLE_HS_ENOMEM;
+        pending++;
+        return 0;
     case BLE_L2CAP_EVENT_COC_CONNECTED:
+        if(pending) pending--;
         if(event->connect.status) {
             b = event_alloc(BleL2capCocEventError, event->connect.conn_handle, 0);
             b->event.error.code = event->connect.status;
+            post_release();
             break;
         }
-        i = channel_index(NULL);
+        i = in_use ? channel_index(NULL) : -1;
         if(i < 0) {
+            // No slot, or the app is gone
             ble_l2cap_disconnect(event->connect.chan);
-            post_error(event->connect.conn_handle, 0, BLE_HS_ENOMEM);
+            if(in_use) post_error(event->connect.conn_handle, 0, BLE_HS_ENOMEM);
             return 0;
         }
         channels[i] = event->connect.chan;
@@ -149,6 +173,7 @@ static int on_l2cap(struct ble_l2cap_event* event, void* arg) {
         }
         break;
     case BLE_L2CAP_EVENT_COC_DISCONNECTED:
+        post_release();
         i = channel_index(event->disconnect.chan);
         if(i < 0) return 0;
         channels[i] = NULL;
@@ -221,7 +246,10 @@ static void run_request(void* arg) {
         rc = sdu ? ble_l2cap_connect(r->conn, r->psm, r->mtu, sdu, on_l2cap, NULL) : BLE_HS_ENOMEM;
         // Past these checks the host owns the buffer, even on failure
         if(sdu && (rc == BLE_HS_EINVAL || rc == BLE_HS_ENOTCONN)) os_mbuf_free_chain(sdu);
-        if(rc != 0) post_error(r->conn, 0, rc);
+        if(rc != 0)
+            post_error(r->conn, 0, rc);
+        else
+            pending++;
         return;
     }
     case RequestSend: {
@@ -273,18 +301,22 @@ static void close_all_fn(struct ble_npl_event* ev) {
     for(size_t i = 0; i < MAX_CHANNELS; i++) {
         if(channels[i]) ble_l2cap_disconnect(channels[i]);
     }
+    post_release();
 }
 
 void ble_l2cap_coc_init(void) {
     ble_dispatch_init();
     if(!close_all_ready) {
         ble_npl_event_init(&close_all_event, close_all_fn, NULL);
+        ble_npl_event_init(&release_event, release_fn, NULL);
         close_all_ready = true;
     }
+    in_use = true;
     nimble_glue_on_app_stop(ble_l2cap_coc_deinit);
 }
 
 void ble_l2cap_coc_deinit(void) {
+    in_use = false;
     ble_dispatch_lock();
     memset(connections, 0, sizeof(connections));
     ble_dispatch_unlock();
@@ -301,7 +333,10 @@ void ble_l2cap_coc_set_callback(
     uint16_t connection_handle,
     BleL2capCocCallback callback,
     void* context) {
-    if(callback) nimble_glue_on_app_stop(ble_l2cap_coc_deinit);
+    if(callback) {
+        nimble_glue_on_app_stop(ble_l2cap_coc_deinit);
+        in_use = true;
+    }
     ble_dispatch_lock();
     size_t slot = MAX_CONNECTIONS;
     for(size_t i = 0; i < MAX_CONNECTIONS; i++) {
