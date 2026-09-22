@@ -17,6 +17,7 @@ static BleGattServerCallback callback;
 static void* context;
 static bool started;
 static volatile uint32_t own_services; /* bit per dyn_gatt service id */
+static volatile uint32_t live_services; /* own_services at the last rebuild */
 
 typedef struct {
     BleGattServerEvent event;
@@ -66,6 +67,7 @@ static void on_write(uint16_t conn, uint16_t attr_handle, const uint8_t* data, u
 }
 
 static void on_committed(void) {
+    live_services = own_services;
     BleGattServerEvent event = {.type = BleGattServerEventTypeCommitted, .char_id = -1};
     post(&event, NULL, 0);
 }
@@ -102,7 +104,8 @@ void ble_gatt_server_deinit(void) {
     dyn_gatt_set_hooks(DYN_GATT_OWNER_SERVER, NULL);
     ble_gatt_server_set_callback(NULL, NULL);
     started = false;
-    if(removed) nimble_glue_gatt_rebuild();
+    // A rebuild drops the companion link; skip it when nothing of ours is on the air
+    if(removed & live_services) nimble_glue_gatt_rebuild();
 }
 
 void ble_gatt_server_set_callback(BleGattServerCallback cb, void* ctx) {
