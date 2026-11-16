@@ -22,6 +22,10 @@ env.Append(
     CPPPATH=[
         "#/lib/nimble_furi/glue",
     ],
+    # The subset of glue functions that external CLI plugins (cli_bt.fal) import.
+    SDK_HEADERS=[
+        File("nimble_furi/glue/nimble_glue_cli_api.h"),
+    ],
 )
 
 libenv = env.Clone(FW_LIB_NAME="nimble")

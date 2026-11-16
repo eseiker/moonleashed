@@ -1,6 +1,7 @@
 #pragma once
 
 #include "base.h"
+#include "public_api.h"
 
 #define SUBGHZ_PROTOCOL_FAAC_SLH_NAME "Faac SLH"
 
@@ -81,3 +82,6 @@ SubGhzProtocolStatus
  * @param output Resulting text
  */
 void subghz_protocol_decoder_faac_slh_get_string(void* context, FuriString* output);
+
+// Reset prog mode vars - faac_slh_reset_prog_mode() is declared in public_api.h
+// TODO: Remake in proper way

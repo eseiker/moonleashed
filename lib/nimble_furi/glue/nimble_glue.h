@@ -6,6 +6,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* The subset exported to CLI plugins lives in its own SDK header. */
+#include "nimble_glue_cli_api.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -17,8 +20,7 @@ void nimble_transport_furi_drops(uint32_t* evt, uint32_t* adv, uint32_t* acl);
 
 bool nimble_glue_start(void);
 
-/* True once started: the HAL then routes to NimBLE, synced or not. */
-bool nimble_glue_is_started(void);
+/* nimble_glue_is_started() is declared in nimble_glue_cli_api.h (exported). */
 bool nimble_glue_is_synced(void);
 bool nimble_glue_is_advertising(void);
 bool nimble_glue_is_connected(void);
@@ -97,9 +99,8 @@ bool nimble_glue_tone_start(uint8_t channel, uint8_t pa_level);
 void nimble_glue_tone_stop(void);
 bool nimble_glue_read_rssi(int8_t* dbm);
 
-/* Crypto self-tests against the NIST P-256 and RFC 4493 vectors. */
-bool sm_alg_pka_selftest(void);
-bool sm_cmac_selftest(void);
+/* sm_alg_pka_selftest() and sm_cmac_selftest() are declared in
+ * nimble_glue_cli_api.h (exported). */
 
 #ifdef __cplusplus
 }
